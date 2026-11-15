@@ -27,7 +27,7 @@
 		{
 			"binding": "OAUTH_KV",
 			// `npx wrangler kv namespace create OAUTH_KV` の出力に表示される ID を貼り付けてください
-			"id": "REPLACE_WITH_YOUR_KV_ID"
+			"id": "8710ef7c7a5c4e5bb8df73fb48237cd9"
 		}
 	]
 }
