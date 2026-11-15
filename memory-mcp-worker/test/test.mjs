@@ -470,6 +470,24 @@ await test('呼び名を宛先に使え、受信箱・タスク・書き手の�
   assert.ok(unknown.error.includes('ミナト（codex-b）'), '登録済みの一覧に呼び名も出る');
 });
 
+await test('返信不要のメッセージ（kind: info）は unreadRequests に数えず、受信箱で info と分かる', async () => {
+  await tool(codexTok, 'read_inbox', {}); // いったん空にする
+  await tool(claudeTok, 'read_inbox', {});
+  const info = await tool(claudeTok, 'send_message', { to: 'ミナト', body: 'ありがとうございました', kind: 'info' });
+  assert.equal(info.kind, 'info');
+  let me = await tool(codexTok, 'whoami', {});
+  assert.equal(me.unreadMessages, 1);
+  assert.equal(me.unreadRequests, 0, 'info は依頼に数えない（見張りが起こさない）');
+  const req = await tool(claudeTok, 'send_message', { to: 'ミナト', body: '確認お願いします' });
+  assert.equal(req.kind, 'request', '既定は request');
+  me = await tool(codexTok, 'whoami', {});
+  assert.equal(me.unreadRequests, 1);
+  const inbox = await tool(codexTok, 'read_inbox', {});
+  assert.equal(inbox.messages.find((m) => m.body === 'ありがとうございました').kind, 'info');
+  assert.equal(inbox.messages.find((m) => m.body === '確認お願いします').kind, undefined, 'request は省く');
+  assert.ok((await tool(claudeTok, 'send_message', { to: 'ミナト', body: 'x', kind: 'fyi' })).error);
+});
+
 // --- Web の確認画面 ---------------------------------------------------------
 
 const kvStore = new Map();

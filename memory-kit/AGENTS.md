@@ -31,4 +31,6 @@
 - 終わったら task_update { status: "done", note: 結果 }。レビューが要るなら task_handoff { to, status: "review", note: ブランチ名と見てほしい点 }
 - 続けられないときは task_update { status: "open", note: 残っていること } で手放す
 - 作業の合間とタスクを終えたときにも read_inbox を確認する
+- すぐ終わらない依頼・あとでやる依頼のメッセージは task_create でタスクにし、元のメッセージ id を説明に書く（既読は「読んだ」であって「対応した」ではない）
+- お礼・完了報告など返信の要らないメッセージは send_message の kind: "info" で送る。kind: "info" のメッセージには返信しない
 - タスクの経過や連絡は記憶（エンティティ）に書かない。残す価値のある決定・教訓だけを記憶に書く

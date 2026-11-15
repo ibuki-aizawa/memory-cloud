@@ -37,6 +37,7 @@ const TASK_LIST_LIMIT = 50;
 const INBOX_LIMIT = 20;
 const MAX_AGENT_NAME = 100;
 const MAX_NICKNAME = 32;
+const MESSAGE_KINDS = ['request', 'info'];
 const MAX_BIO = 200;
 
 // ---------------------------------------------------------------------------
@@ -247,20 +248,21 @@ const TOOLS = [
   },
   {
     name: 'send_message',
-    description: 'ほかのエージェントの受信箱にメッセージを送ります。相手は read_inbox で読みます（すぐには届かず、相手が確認したときに読まれます）。',
+    description: 'ほかのエージェントの受信箱にメッセージを送ります。相手は read_inbox で読みます（すぐには届かず、相手が確認したときに読まれます）。お礼・完了報告など返信の要らないものは kind: "info" にしてください（相手は返信せず、見張りのスクリプトも相手を起こしません）。',
     inputSchema: {
       type: 'object',
       properties: {
-        to: { type: 'string', description: '相手のエージェント名' },
+        to: { type: 'string', description: '相手のエージェント名か呼び名' },
         body: { type: 'string' },
         taskId: { type: 'integer', description: '関係するタスクの id' },
+        kind: { type: 'string', enum: MESSAGE_KINDS, description: 'request（返信・対応が要る。既定）か info（返信不要のお知らせ）' },
       },
       required: ['to', 'body'],
     },
   },
   {
     name: 'read_inbox',
-    description: `自分宛てのメッセージを古い順に返し（最大 ${INBOX_LIMIT} 件）、既読にします。`,
+    description: `自分宛てのメッセージを古い順に返し（最大 ${INBOX_LIMIT} 件）、既読にします。kind: "info" のメッセージには返信しないでください。既読は「読んだ」であって「対応した」ではないので、すぐ終わらない依頼は task_create でタスクにしてください。`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -417,6 +419,8 @@ function scopeInstructions(scope) {
     '協調（ほかの AI と分担するとき）:',
     '- 作業する前に task_claim で引き受ける。ほかの AI が担当中のタスクには手を出さない',
     '- 長い作業では task_update で note を残す。終わったら done にするか、task_handoff でレビューを頼む',
+    '- お礼・完了報告など返信の要らないメッセージは send_message の kind: "info" で送る。kind: "info" のメッセージには返信しない（AI どうしの返信の往復を止めるため）',
+    '- 既読は「読んだ」であって「対応した」ではない。すぐ終わらない依頼のメッセージは task_create でタスクにして、元のメッセージ id を説明に書く',
   ];
   if (scope === 'global') {
     return [
@@ -460,6 +464,7 @@ const HANDLERS = {
       .prepare(
         `SELECT
            (SELECT COUNT(*) FROM messages WHERE scope = ?1 AND to_agent = ?2 AND read_at IS NULL) AS unread,
+           (SELECT COUNT(*) FROM messages WHERE scope = ?1 AND to_agent = ?2 AND read_at IS NULL AND kind = 'request') AS requests,
            (SELECT COUNT(*) FROM tasks WHERE scope = ?1 AND assignee = ?2 AND status IN ('in_progress', 'review')) AS mine`
       )
       .bind(scope, identity.name)
@@ -471,6 +476,7 @@ const HANDLERS = {
       if (profile.bio) out.bio = profile.bio;
     }
     out.unreadMessages = counts.unread;
+    out.unreadRequests = counts.requests; // 返信・対応が要る未読（info を除く）
     out.myActiveTasks = counts.mine;
     out.hint = hints[identity.kind];
     if (!profile) out.profileHint = '呼び名が未設定です。ユーザーに名前を付けてもらったら set_profile で登録してください';
@@ -725,16 +731,18 @@ const HANDLERS = {
   async send_message(args, { db, scope, author }) {
     const to = await agentName(db, args.to, 'to');
     const body = str(args.body, 'body', MAX_CONTENT_LENGTH);
+    const kind = args.kind === undefined || args.kind === null ? 'request' : args.kind;
+    if (!MESSAGE_KINDS.includes(kind)) throw new ToolInputError('kind は request か info にしてください');
     let task = null;
     if (args.taskId !== undefined && args.taskId !== null) {
       task = taskId(args.taskId, 'taskId');
       if (!(await getTask(db, scope, task))) throw new ToolInputError(`タスク ${task} はありません`);
     }
     const row = await db
-      .prepare('INSERT INTO messages (scope, to_agent, from_agent, body, task_id) VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id')
-      .bind(scope, to, author, body, task)
+      .prepare('INSERT INTO messages (scope, to_agent, from_agent, body, task_id, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id')
+      .bind(scope, to, author, body, task, kind)
       .first();
-    const out = { sent: true, id: row.id, to };
+    const out = { sent: true, id: row.id, to, kind };
     addNickname(out, 'to', await nicknames(db, [to]));
     return out;
   },
@@ -743,7 +751,7 @@ const HANDLERS = {
     const includeRead = args.includeRead === true;
     const { results } = await db
       .prepare(
-        `SELECT id, from_agent AS "from", body, task_id AS taskId, created_at AS createdAt, read_at AS readAt
+        `SELECT id, from_agent AS "from", body, task_id AS taskId, kind, created_at AS createdAt, read_at AS readAt
          FROM messages
          WHERE scope = ?1 AND to_agent = ?2 ${includeRead ? '' : 'AND read_at IS NULL'}
          ORDER BY id ${includeRead ? 'DESC' : 'ASC'}
@@ -765,6 +773,7 @@ const HANDLERS = {
         const item = { id: m.id, from: m.from, body: m.body, createdAt: m.createdAt };
         addNickname(item, 'from', nick);
         if (m.taskId !== null) item.taskId = m.taskId;
+        if (m.kind === 'info') item.kind = 'info'; // 返信不要（request は既定なので省く）
         if (includeRead) item.read = !!m.readAt;
         return item;
       }),

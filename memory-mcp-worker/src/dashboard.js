@@ -186,7 +186,7 @@ async function overview({ db }) {
          (SELECT COUNT(*) FROM tasks WHERE scope = s.scope AND status IN ('open', 'in_progress', 'review')) AS active,
          (SELECT COUNT(*) FROM tasks WHERE scope = s.scope AND status IN ('in_progress', 'review')
             AND lease_expires_at IS NOT NULL AND lease_expires_at <= datetime('now')) AS expired,
-         (SELECT COUNT(*) FROM messages WHERE scope = s.scope AND read_at IS NULL) AS unread
+         (SELECT COUNT(*) FROM messages WHERE scope = s.scope AND read_at IS NULL AND kind = 'request') AS unread
        FROM (SELECT scope FROM entities UNION SELECT scope FROM tasks UNION SELECT scope FROM messages) AS s
        ORDER BY s.scope = 'global' DESC, s.scope`
     )
@@ -204,7 +204,7 @@ async function overview({ db }) {
     .join('');
   const body = results.length
     ? `<table>
-<thead><tr><th>スコープ</th><th class="num">記憶</th><th class="num">進行中のタスク</th><th class="num">未読メッセージ</th></tr></thead>
+<thead><tr><th>スコープ</th><th class="num">記憶</th><th class="num">進行中のタスク</th><th class="num">未読の依頼</th></tr></thead>
 <tbody>${rows}</tbody></table>`
     : '<p class="muted">まだ記憶もタスクもありません。</p>';
   return html(200, '概要', body);
@@ -377,6 +377,7 @@ function messageList(list, nick, tz, scope) {
   <div class="meta">${who(m.from_agent, nick)} → ${who(m.to_agent, nick)}
     <span class="muted">· ${esc(time(m.created_at, tz))}</span>
     ${m.read_at ? '<span class="muted">· 既読</span>' : '<span class="badge">未読</span>'}
+    ${m.kind === 'info' ? '<span class="muted">· 返信不要</span>' : ''}
     ${m.task_id ? `<a href="/dashboard/tasks/${m.task_id}?scope=${encodeURIComponent(scope)}">#${m.task_id}</a>` : ''}</div>
   <div class="text">${multiline(m.body)}</div>
 </li>`
