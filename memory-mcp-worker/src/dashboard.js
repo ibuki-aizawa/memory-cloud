@@ -187,9 +187,13 @@ function equalText(a, b) {
   return diff === 0;
 }
 
+/**
+ * 同じオリジンからの送信か。Origin を優先し、Origin がない・"null"（リファラーを送らない設定のときなど）なら
+ * ブラウザが付ける Sec-Fetch-Site で判断する（どちらもページの JavaScript からは偽れない）
+ */
 function sameOrigin(request, url) {
   const origin = request.headers.get('Origin');
-  if (origin) return origin === url.origin;
+  if (origin && origin !== 'null') return origin === url.origin;
   return request.headers.get('Sec-Fetch-Site') === 'same-origin';
 }
 
@@ -524,7 +528,7 @@ function html(status, title, body, { nav = true } = {}) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
+<meta name="referrer" content="same-origin">
 <title>${esc(title)} — memory-mcp</title>
 <style>${STYLE}</style>
 </head>
@@ -553,7 +557,7 @@ ${body}
       'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
       'X-Frame-Options': 'DENY',
       'X-Content-Type-Options': 'nosniff',
-      'Referrer-Policy': 'no-referrer',
+      'Referrer-Policy': 'same-origin', // no-referrer だとフォーム送信の Origin が null になり、ログインできない
     },
   });
 }

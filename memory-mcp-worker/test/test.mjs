@@ -568,6 +568,19 @@ await test('確認画面: 偽の Cookie・別サイトからの POST・試行の
   assert.equal((await dash('POST', '/dashboard/login', { form: { token: 'test-token' }, ip: '198.51.100.2' })).status, 303, 'ほかの IP は影響しない');
 });
 
+await test('確認画面: ブラウザが Origin: null を送っても、Sec-Fetch-Site が same-origin ならログインできる', async () => {
+  const send = (headers) => worker.fetch(new Request('https://example.com/dashboard/login', {
+    method: 'POST', headers: { 'CF-Connecting-IP': '198.51.100.7', 'Content-Type': 'application/x-www-form-urlencoded', ...headers },
+    body: new URLSearchParams({ token: 'test-token' }), redirect: 'manual',
+  }), dashEnv);
+  assert.equal((await send({ Origin: 'null', 'Sec-Fetch-Site': 'same-origin' })).status, 303);
+  assert.equal((await send({ Origin: 'null', 'Sec-Fetch-Site': 'cross-site' })).status, 403);
+  assert.equal((await send({ Origin: 'null' })).status, 403);
+  assert.equal((await send({ 'Sec-Fetch-Site': 'same-origin' })).status, 303);
+  const page = await dash('GET', '/dashboard');
+  assert.equal(page.headers.get('referrer-policy'), 'same-origin', 'no-referrer だと Origin が null になる');
+});
+
 await test('確認画面: HTTP は HTTPS に転送（localhost は除く）', async () => {
   const res = await worker.fetch(new Request('http://example.com/dashboard/tasks?scope=global', { redirect: 'manual' }), dashEnv);
   assert.equal(res.status, 301);
