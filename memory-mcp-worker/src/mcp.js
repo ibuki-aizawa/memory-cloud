@@ -20,7 +20,7 @@ import { adminIdentity, bearerToken, handleAdmin, resolveAgent } from './agents.
 import { handleDashboard, isDashboardPath } from './dashboard.js';
 import { GUIDE_PROMPT, GUIDE_PROMPT_NAME, GUIDE_RESOURCE, GUIDE_URI, GUIDE_VERSION, renderGuide, renderOnboardingPrompt } from './guide.js';
 
-const SERVER_INFO = { name: 'memory-mcp', version: '1.2.0' };
+const SERVER_INFO = { name: 'memory-mcp', version: '1.3.0' };
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 
 const MAX_ITEMS = 20;          // 1 回のツール呼び出しで扱う最大件数
@@ -410,7 +410,7 @@ async function handleMessage(msg, ctx) {
       return rpcResult(msg.id, { resources: [GUIDE_RESOURCE] });
     case 'resources/read': {
       if (params.uri !== GUIDE_URI) return rpcError(msg.id, -32602, 'Unknown resource URI');
-      return rpcResult(msg.id, { contents: [{ uri: GUIDE_URI, mimeType: GUIDE_RESOURCE.mimeType, text: await readGuide(ctx) }] });
+      return rpcResult(msg.id, { contents: [{ uri: GUIDE_URI, mimeType: GUIDE_RESOURCE.mimeType, text: await readGuide(ctx, { recordRead: false }) }] });
     }
     case 'prompts/list':
       return rpcResult(msg.id, { prompts: [GUIDE_PROMPT] });
@@ -426,12 +426,7 @@ async function handleMessage(msg, ctx) {
   }
 }
 
-/**
- * 接続したときに AI へ渡す説明（MCP の instructions）。
- * ルールファイル（CLAUDE.md / AGENTS.md）を読めない Web 版・モバイル版のチャットでも同じ動きになるよう、要点をここに書く。
- * どこまで従うかはクライアント次第なので、詳しいルールはこれまでどおりルールファイルに置く。
- */
-async function readGuide({ db, identity, scope }) {
+async function readGuide({ db, identity, scope }, { recordRead = true } = {}) {
   const [participants, counts] = await Promise.all([
     db.prepare(
       `SELECT a.name AS identity, p.nickname AS nickname
@@ -445,17 +440,24 @@ async function readGuide({ db, identity, scope }) {
     db.prepare(
       `SELECT
          (SELECT COUNT(*) FROM tasks WHERE scope = ?1 AND status IN ('open', 'in_progress', 'review')) AS activeTasks,
-         (SELECT COUNT(*) FROM messages WHERE scope = ?1 AND to_agent = ?2 AND read_at IS NULL) AS unreadMessages`
+         (SELECT COUNT(*) FROM messages WHERE scope = ?1 AND to_agent = ?2 AND read_at IS NULL AND kind = 'request') AS unreadRequests`
     ).bind(scope, identity.name).first(),
   ]);
-  const markdown = renderGuide({ scope, agents: participants.results, activeTasks: counts.activeTasks, unreadMessages: counts.unreadMessages });
-  await db.prepare(
-    `INSERT INTO guide_reads (identity, scope, version, read_at) VALUES (?1, ?2, ?3, datetime('now'))
-     ON CONFLICT (identity, scope) DO UPDATE SET version = excluded.version, read_at = excluded.read_at`
-  ).bind(identity.name, scope, GUIDE_VERSION).run();
+  const markdown = renderGuide({ scope, agents: participants.results, activeTasks: counts.activeTasks, unreadRequests: counts.unreadRequests });
+  if (recordRead) {
+    await db.prepare(
+      `INSERT INTO guide_reads (identity, scope, version, read_at) VALUES (?1, ?2, ?3, datetime('now'))
+       ON CONFLICT (identity, scope) DO UPDATE SET version = excluded.version, read_at = excluded.read_at`
+    ).bind(identity.name, scope, GUIDE_VERSION).run();
+  }
   return markdown;
 }
 
+/**
+ * 接続したときに AI へ渡す説明（MCP の instructions）。
+ * ルールファイル（CLAUDE.md / AGENTS.md）を読めない Web 版・モバイル版のチャットでも同じ動きになるよう、要点をここに書く。
+ * どこまで従うかはクライアント次第なので、詳しいルールはこれまでどおりルールファイルに置く。
+ */
 function scopeInstructions(scope) {
   const common = [
     '記憶の使い方:',

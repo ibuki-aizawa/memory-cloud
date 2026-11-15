@@ -669,6 +669,12 @@ await test('guide: 初回ヒント、ガイド内容、訪問記録、resource/p
   assert.equal(who.firstVisit, true);
   assert.match(who.guideHint, /初めて/);
   assert.equal(who.guideVersion, '1.0.0');
+  const resourceList = await post(P, { jsonrpc: '2.0', id: nextId++, method: 'resources/list' }, token);
+  assert.equal(resourceList.body.result.resources[0].uri, 'memory://guide');
+  const resource = await post(P, { jsonrpc: '2.0', id: nextId++, method: 'resources/read', params: { uri: 'memory://guide' } }, token);
+  assert.match(resource.body.result.contents[0].text, /ガイド版/);
+  const afterResourceRead = await tool(token, 'whoami', {}, P);
+  assert.equal(afterResourceRead.firstVisit, true, 'resource の先読みでは既読にしない');
 
   const guide = await tool(token, 'guide', {}, P);
   assert.match(guide, /ガイド版: 1\.0\.0/);
@@ -679,10 +685,7 @@ await test('guide: 初回ヒント、ガイド内容、訪問記録、resource/p
   assert.equal(after.firstVisit, undefined);
   assert.equal(after.guideHint, undefined);
 
-  const resourceList = await post(P, { jsonrpc: '2.0', id: nextId++, method: 'resources/list' }, token);
-  assert.equal(resourceList.body.result.resources[0].uri, 'memory://guide');
-  const resource = await post(P, { jsonrpc: '2.0', id: nextId++, method: 'resources/read', params: { uri: 'memory://guide' } }, token);
-  assert.match(resource.body.result.contents[0].text, /ガイド版/);
+
   const prompts = await post(P, { jsonrpc: '2.0', id: nextId++, method: 'prompts/list' }, token);
   assert.equal(prompts.body.result.prompts[0].name, 'memory-onboarding');
   const prompt = await post(P, { jsonrpc: '2.0', id: nextId++, method: 'prompts/get', params: { name: 'memory-onboarding' } }, token);

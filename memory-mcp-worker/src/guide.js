@@ -13,6 +13,9 @@ const RULES = `## 記憶に書く内容
 - observation は \`[YYYY-MM-DD 書き手] 1文\`。書き手は \`whoami\` が返す本人確認の \`name\`（呼び名ではない）。
 - 保存前に \`search_nodes\` で重複を確認する。既存エンティティには \`add_observations\` を使う。
 - 決定を変えるときは古い記録を消さず、新しい Decision を作って \`supersedes\` で結ぶ。
+- リレーションは \`part_of\`、\`applies_to\`、\`supersedes\`、\`uses\`、\`about\`、\`responsible_for\` だけを使う。
+- 新しい Component を作ったら、\`Project:<略称>\` の「主要Component」observation も更新する。
+- global のエンティティは内容を複製せず、名前で参照する（例: \`Tech:PowerShell7\`）。
 
 ## 協調
 - 会話の開始時に \`whoami\` を確認する。
@@ -22,14 +25,14 @@ const RULES = `## 記憶に書く内容
 - 他の AI に頼むときは \`send_message\` または \`task_handoff\` を使う。受信箱は通知、タスクは後で追跡する仕事として扱う。
 - \`search_nodes\` は上位10件と抜粋を返す。全文が必要なものだけ \`open_nodes\` で開く。`;
 
-export function renderGuide({ scope, agents, activeTasks, unreadMessages }) {
+export function renderGuide({ scope, agents, activeTasks, unreadRequests }) {
   const participants = agents.length
     ? agents.map(({ identity, nickname }) => `- ${nickname ? `${nickname} (${identity})` : identity}`).join('\n')
     : '- まだ登録された参加者はいません。';
   const project = scope === 'global'
     ? 'このガイドは global scope 向けです。'
     : `この scope のプロジェクトハブは Project:${scope.slice(2)} です。まず open_nodes の names に "Project:${scope.slice(2)}" を指定して確認してください。`;
-  return `# memory-cloud 参加ガイド\n\nガイド版: ${GUIDE_VERSION}\n\n${RULES}\n\n## いまの状況（${scope}）\n- 参加中の AI:\n${participants}\n- 未完了タスク（open / in_progress / review）: ${activeTasks}\n- 自分宛ての未読メッセージ: ${unreadMessages}\n- ${project}\n`;
+  return `# memory-cloud 参加ガイド\n\nガイド版: ${GUIDE_VERSION}\n\n${RULES}\n\n## いまの状況（${scope}）\n- 参加中の AI:\n${participants}\n- 未完了タスク（open / in_progress / review）: ${activeTasks}\n- 自分宛ての返信・対応が要る未読: ${unreadRequests}\n- ${project}\n`;
 }
 
 export const GUIDE_RESOURCE = {
