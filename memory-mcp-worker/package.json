@@ -6,9 +6,13 @@
     "deploy": "wrangler deploy",
     "db:init": "wrangler d1 execute memory-mcp --remote --file=schema.sql",
     "db:export": "wrangler d1 export memory-mcp --remote --output=backup.sql",
-    "test": "node --experimental-sqlite --no-warnings test/test.mjs"
+    "test": "node --experimental-sqlite --no-warnings test/test.mjs",
+    "test:oauth": "node test/oauth.test.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.162.0"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.2.4"
   }
 }

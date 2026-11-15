@@ -3,7 +3,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
-import worker from '../src/index.js';
+import worker from '../src/mcp.js';
 
 // --- D1 互換の最小シム ------------------------------------------------------
 class Stmt {

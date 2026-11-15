@@ -27,9 +27,9 @@ MCP の Streamable HTTP に対応し、`Authorization` ヘッダーを設定で�
 サーバーは接続時（`initialize`）にスコープごとの使い方を `instructions` として返すので、
 ルールファイルを読まないクライアントでも最低限の使い方は伝わります。
 
-対応していないもの:
+そのほか:
+- **claude.ai などの Web 版コネクタ**: OAuth（GitHub でサインイン）で接続できます（[Web 版クライアントで使う](#web-版クライアントで使うoauth)）
 - **stdio にしか対応していないクライアント**: [mcp-remote](https://www.npmjs.com/package/mcp-remote) を挟めば使えます（[後述](#ほかのクライアントでの設定)）
-- **claude.ai / ChatGPT などの Web 版コネクタ**: OAuth 認証が必要なため、今のところ使えません
 
 ## AWS との対応
 
@@ -37,6 +37,7 @@ MCP の Streamable HTTP に対応し、`Authorization` ヘッダーを設定で�
 |---|---|---|
 | Workers | Lambda + 関数 URL | MCP サーバー本体（URL は `*.workers.dev`） |
 | D1 | サーバーレスの SQLite（課金は行数単位） | 記憶の保存先 |
+| KV | DynamoDB（キーと値だけの単純なもの） | OAuth のトークンの保存先 |
 | wrangler | SAM CLI / CDK CLI | デプロイ・DB 操作の CLI |
 | `wrangler secret` | Lambda の暗号化環境変数 / Secrets Manager | トークンの保管 |
 | `wrangler.jsonc` | SAM テンプレート | 設定ファイル |
@@ -65,7 +66,7 @@ https://dash.cloudflare.com/sign-up でメールアドレスを登録し、確�
 
 ```powershell
 cd memory-mcp-worker
-npm install -D wrangler@latest
+npm install               # wrangler と OAuth のライブラリが入る
 npx wrangler login        # ブラウザが開くので「Allow」
 npx wrangler whoami       # アカウント名が出れば OK
 ```
@@ -86,10 +87,20 @@ npx wrangler d1 execute memory-mcp --remote --command "SELECT name FROM sqlite_m
 
 `entities` / `observations` / `relations` が表示されれば OK です。
 
+続けて、OAuth 用の KV を作ります（Web 版クライアントを使わない場合も、デプロイに必要です）。
+
+```powershell
+npx wrangler kv namespace create OAUTH_KV
+```
+
+出力に表示される `id` を `wrangler.jsonc` の `REPLACE_WITH_YOUR_KV_ID` に貼り付けます。
+設定ファイルに自動で追加するか聞かれたら **No** を選んでください（既に書いてあるため）。
+
 ### 4. デプロイする
 
 ```powershell
 npm test                  # （任意）ローカルテスト。Node.js 22.5 以上
+npm run test:oauth        # （任意）OAuth のローカル結合テスト。wrangler dev を起動するので 1 分ほどかかる
 npm run deploy
 ```
 
@@ -186,6 +197,65 @@ URL だけではアクセスできませんが、公開リポジトリで URL �
 `setup-client.ps1` を実行済みなら、リポジトリを clone してエージェントを起動するだけです。
 初回はプロジェクトのサーバーを使うか確認されるクライアントがあるので、許可してください。
 Codex CLI はプロジェクトを trusted にしたときだけ `.codex/config.toml` を読みます。
+
+---
+
+## Web 版クライアントで使う（OAuth）
+
+claude.ai のカスタムコネクタ（Web 版・デスクトップ版・モバイル版）など、固定トークンを設定できないクライアントは、
+OAuth で接続します。サインインには GitHub アカウントを使い、許可した GitHub ユーザーだけが接続できます。
+
+- 固定トークン（`MEMORY_TOKEN`）での接続はこれまでどおり使えます。Claude Code などの設定を変える必要はありません
+- 下の設定をするまで OAuth は無効で、固定トークンでしか接続できません
+
+### 1. GitHub OAuth App を作る（全体で 1 回）
+
+https://github.com/settings/applications/new で次のように登録します。
+
+| 項目 | 値 |
+|---|---|
+| Application name | `memory-mcp`（任意） |
+| Homepage URL | `https://memory-mcp.<サブドメイン>.workers.dev` |
+| Authorization callback URL | `https://memory-mcp.<サブドメイン>.workers.dev/oauth/github/callback` |
+| Enable Device Flow | チェックしない |
+
+登録後の画面で **Client ID** を控え、**Generate a new client secret** で Client secret を作って控えます（secret は一度しか表示されません）。
+
+### 2. Worker に設定してデプロイする
+
+```powershell
+cd memory-mcp-worker
+npx wrangler secret put GITHUB_CLIENT_ID        # Client ID を貼り付け
+npx wrangler secret put GITHUB_CLIENT_SECRET    # Client secret を貼り付け
+npx wrangler secret put ALLOWED_GITHUB_USERS    # 許可する GitHub ユーザー名（複数はカンマ区切り）
+npm run deploy
+```
+
+`ALLOWED_GITHUB_USERS` が空だと、誰もサインインできません。
+
+### 3. claude.ai に登録する
+
+claude.ai の **設定 > コネクタ > カスタムコネクタを追加** で、使うスコープの URL を登録します。
+URL ごとに 1 つのコネクタになります。
+
+| コネクタ名（例） | URL |
+|---|---|
+| memory-global | `https://memory-mcp.<サブドメイン>.workers.dev/mcp/global` |
+| memory-myapp | `https://memory-mcp.<サブドメイン>.workers.dev/mcp/p/myapp` |
+
+「連携/接続」を押すと、memory-mcp の同意画面 → GitHub のサインインの順に進みます。
+OAuth Client ID / Secret の欄は空のままで構いません（クライアントの登録は自動で行われます）。
+
+ChatGPT など、ほかの OAuth 対応クライアントでも同じ URL で接続できます。
+
+### 仕組みとセキュリティ
+
+- 実装には Cloudflare 公式の [`@cloudflare/workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider) を使っています（OAuth 2.1 + PKCE、動的クライアント登録、MCP の認可仕様に対応）
+- `/mcp` 以下全体が 1 つのリソースです。1 回の接続で、`/mcp/global` も `/mcp/p/<略称>` も使えます
+- アクセストークンの有効期限は 1 時間で、クライアントが自動で更新します。60 日使わなければ再ログインが必要です
+- KV にはトークンのハッシュと暗号化した情報だけが入ります。GitHub のトークンは保存しません
+- 接続を止めたいとき: `ALLOWED_GITHUB_USERS` からユーザーを外すと、発行済みのトークンもすぐに使えなくなります
+  （`npx wrangler secret put ALLOWED_GITHUB_USERS` で上書き）
 
 ---
 
@@ -297,12 +367,17 @@ npm run db:export         # backup.sql に書き出し（git にはコミット�
 | Cursor / VS Code / Windsurf でつながらない | エディターを完全に終了してから起動し直す（起動中のエディターには新しい環境変数が反映されない） |
 | Codex でプロジェクトの memory-project が出ない | プロジェクトを trusted にする。`.codex/config.toml` の URL が `{{MEMORY_URL}}` のままなら `init-project.ps1` を再実行 |
 | 設定ファイルを壊してしまった | `setup-client.ps1` が残した `<ファイル名>.bak` から戻す |
+| デプロイで KV のエラー | `wrangler.jsonc` の `REPLACE_WITH_YOUR_KV_ID` が置き換わっていない。初回セットアップ 3 の KV を作る |
+| claude.ai で「このアカウントは許可されていません」 | `ALLOWED_GITHUB_USERS` に GitHub のユーザー名を追加する |
+| GitHub で redirect_uri のエラー | GitHub OAuth App の callback URL が `<URL>/oauth/github/callback` になっているか確認 |
+| OAuth のエラーの詳細を見たい | `npx wrangler tail` で、拒否した理由がログに出る |
 | 401 Unauthorized | トークンの不一致。`wrangler secret put` した値と環境変数を見比べる |
 | 404 | URL の誤り。略称は英小文字・数字・ハイフンのみ |
 | D1 の上限エラー | 無料枠（1 日 読み取り 500 万行 / 書き込み 10 万行）の超過。UTC 0 時（日本時間 9 時）に回復 |
 
 ## セキュリティ
 
-- `workers.dev` の URL は誰でもアクセスできます。守りはトークンだけなので、トークンは git にコミットしないでください。
+- `workers.dev` の URL は誰でもアクセスできます。守りはトークン（固定トークンと OAuth）だけなので、トークンは git にコミットしないでください。
+- OAuth で接続できるのは `ALLOWED_GITHUB_USERS` の GitHub ユーザーだけです。GitHub アカウントには 2 段階認証を設定してください。
 - Claude Code の `memory-global` の登録情報（トークンを含む）は各 PC の `~/.claude.json` に保存されます。
   ほかのクライアントの設定ファイルにはトークンは入らず、ユーザー環境変数 `MEMORY_TOKEN` を参照します。

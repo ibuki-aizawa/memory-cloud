@@ -4,6 +4,8 @@
 	"name": "memory-mcp",
 	"main": "src/index.js",
 	"compatibility_date": "2026-09-01",
+	// OAuth のクライアント情報（CIMD）を取りに行くときの SSRF 対策。@cloudflare/workers-oauth-provider が要求する
+	"compatibility_flags": ["global_fetch_strictly_public"],
 	"observability": {
 		"enabled": true
 	},
@@ -18,6 +20,14 @@
 			"binding": "memory_mcp",
 			"database_name": "memory-mcp",
 			"database_id": "2167f88c-f53a-494d-8b1f-5555bb7c1101"
+		}
+	],
+	// OAuth のトークン・クライアント情報の保存先（Web 版クライアント向け。README の「Web 版クライアントで使う」）
+	"kv_namespaces": [
+		{
+			"binding": "OAUTH_KV",
+			// `npx wrangler kv namespace create OAUTH_KV` の出力に表示される ID を貼り付けてください
+			"id": "REPLACE_WITH_YOUR_KV_ID"
 		}
 	]
 }
