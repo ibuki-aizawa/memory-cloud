@@ -18,6 +18,7 @@
  */
 import { adminIdentity, bearerToken, handleAdmin, resolveAgent } from './agents.js';
 import { handleDashboard, isDashboardPath } from './dashboard.js';
+import { GUIDE_PROMPT, GUIDE_PROMPT_NAME, GUIDE_RESOURCE, GUIDE_URI, GUIDE_VERSION, renderGuide, renderOnboardingPrompt } from './guide.js';
 
 const SERVER_INFO = { name: 'memory-mcp', version: '1.2.0' };
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
@@ -185,6 +186,11 @@ const TOOLS = [
   },
 
   // --- 協調（タスクボードと受信箱）。タスクとメッセージはスコープ（プロジェクト）ごと ---
+  {
+    name: 'guide',
+    description: '記憶の書き方、協調ルール、参加者、現在の scope の状況を Markdown で返します。初めての参加時や whoami に guideHint があるときに読んでください。',
+    inputSchema: { type: 'object', properties: {} },
+  },
   {
     name: 'task_create',
     description: 'タスクを作ります。claim: true なら作ると同時に自分が引き受けます。',
@@ -385,7 +391,11 @@ async function handleMessage(msg, ctx) {
         : SUPPORTED_PROTOCOL_VERSIONS[0];
       return rpcResult(msg.id, {
         protocolVersion,
-        capabilities: { tools: { listChanged: false } },
+        capabilities: {
+          tools: { listChanged: false },
+          resources: { subscribe: false, listChanged: false },
+          prompts: { listChanged: false },
+        },
         serverInfo: SERVER_INFO,
         instructions: scopeInstructions(ctx.scope),
       });
@@ -396,6 +406,21 @@ async function handleMessage(msg, ctx) {
       return rpcResult(msg.id, { tools: TOOLS });
     case 'tools/call':
       return rpcResult(msg.id, await callTool(params.name, params.arguments || {}, ctx));
+    case 'resources/list':
+      return rpcResult(msg.id, { resources: [GUIDE_RESOURCE] });
+    case 'resources/read': {
+      if (params.uri !== GUIDE_URI) return rpcError(msg.id, -32602, 'Unknown resource URI');
+      return rpcResult(msg.id, { contents: [{ uri: GUIDE_URI, mimeType: GUIDE_RESOURCE.mimeType, text: await readGuide(ctx) }] });
+    }
+    case 'prompts/list':
+      return rpcResult(msg.id, { prompts: [GUIDE_PROMPT] });
+    case 'prompts/get': {
+      if (params.name !== GUIDE_PROMPT_NAME) return rpcError(msg.id, -32602, 'Unknown prompt');
+      return rpcResult(msg.id, {
+        description: GUIDE_PROMPT.description,
+        messages: [{ role: 'user', content: { type: 'text', text: renderOnboardingPrompt(ctx.scope) } }],
+      });
+    }
     default:
       return rpcError(msg.id, -32601, `Method not found: ${msg.method}`);
   }
@@ -406,10 +431,35 @@ async function handleMessage(msg, ctx) {
  * ルールファイル（CLAUDE.md / AGENTS.md）を読めない Web 版・モバイル版のチャットでも同じ動きになるよう、要点をここに書く。
  * どこまで従うかはクライアント次第なので、詳しいルールはこれまでどおりルールファイルに置く。
  */
+async function readGuide({ db, identity, scope }) {
+  const [participants, counts] = await Promise.all([
+    db.prepare(
+      `SELECT a.name AS identity, p.nickname AS nickname
+       FROM agents AS a LEFT JOIN profiles AS p ON p.identity = a.name
+       WHERE a.revoked_at IS NULL
+       UNION ALL
+       SELECT p.identity, p.nickname FROM profiles AS p
+       WHERE p.identity NOT IN (SELECT name FROM agents)
+       ORDER BY identity`
+    ).all(),
+    db.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM tasks WHERE scope = ?1 AND status IN ('open', 'in_progress', 'review')) AS activeTasks,
+         (SELECT COUNT(*) FROM messages WHERE scope = ?1 AND to_agent = ?2 AND read_at IS NULL) AS unreadMessages`
+    ).bind(scope, identity.name).first(),
+  ]);
+  const markdown = renderGuide({ scope, agents: participants.results, activeTasks: counts.activeTasks, unreadMessages: counts.unreadMessages });
+  await db.prepare(
+    `INSERT INTO guide_reads (identity, scope, version, read_at) VALUES (?1, ?2, ?3, datetime('now'))
+     ON CONFLICT (identity, scope) DO UPDATE SET version = excluded.version, read_at = excluded.read_at`
+  ).bind(identity.name, scope, GUIDE_VERSION).run();
+  return markdown;
+}
+
 function scopeInstructions(scope) {
   const common = [
     '記憶の使い方:',
-    '- 会話の始めに whoami を 1 回呼ぶ。unreadMessages があれば read_inbox、myActiveTasks があれば task_list { mine: true } を確認する',
+    '- 会話の始めに whoami を 1 回呼ぶ。firstVisit または guideHint があれば guide を読み、unreadRequests があれば read_inbox、myActiveTasks があれば task_list { mine: true } を確認する',
     '- whoami に nickname があれば、それが自分の呼び名。ユーザーに名前を付けられたら set_profile で登録する（ほかのエージェントにも呼び名で宛てられる）',
     '- 必要になったら search_nodes で探す（上位 10 件と抜粋だけ返る）。全文が要るものだけ open_nodes で開く。read_graph はない',
     '- 保存するのは今後も使う事実・決定・教訓だけ。会話や作業のログは保存しない',
@@ -441,7 +491,7 @@ async function callTool(name, args, ctx) {
   if (!handler) return toolError(`Unknown tool: ${name}`);
   try {
     const result = await handler(args, ctx);
-    return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] };
   } catch (err) {
     if (err instanceof ToolInputError) return toolError(err.message);
     console.error(err);
@@ -470,7 +520,14 @@ const HANDLERS = {
       .bind(scope, identity.name)
       .first();
     const profile = await db.prepare('SELECT nickname, bio FROM profiles WHERE identity = ?1').bind(identity.name).first();
-    const out = { name: identity.name, kind: identity.kind, scope };
+    const guideRead = await db.prepare('SELECT version FROM guide_reads WHERE identity = ?1 AND scope = ?2').bind(identity.name, scope).first();
+    const out = { name: identity.name, kind: identity.kind, scope, guideVersion: GUIDE_VERSION };
+    if (!guideRead) {
+      out.firstVisit = true;
+      out.guideHint = '初めての参加です。まず guide を読んでください';
+    } else if (guideRead.version !== GUIDE_VERSION) {
+      out.guideHint = 'ガイドが更新されました。guide を読み直してください';
+    }
     if (profile) {
       out.nickname = profile.nickname;
       if (profile.bio) out.bio = profile.bio;
@@ -523,6 +580,10 @@ const HANDLERS = {
   },
 
   // --- 協調 -----------------------------------------------------------------
+
+  async guide(_args, ctx) {
+    return readGuide(ctx);
+  },
 
   async task_create(args, { db, scope, author }) {
     const title = str(args.title, 'title', MAX_NAME_LENGTH);

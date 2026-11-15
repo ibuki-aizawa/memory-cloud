@@ -25,6 +25,10 @@ memory-cloud の記憶が、どんな形で保存され、AI がどう使うか�
 `<略称>` は、プロジェクトごとに決める英小文字・数字・ハイフンの短い名前です（例: `myapp`）。
 スコープが違えば、同じ名前のエンティティでも別のものとして扱われます。
 
+## 参加ガイド
+
+MCP に接続した AI は `whoami` を呼び、`firstVisit` または `guideHint` が返ったら `guide` を読んでください。ガイドは `memory://guide` resource と `memory-onboarding` prompt からも取得できます。読んだ版は本人確認名と scope ごとに記録され、ガイドの版が上がると再読の案内が出ます。
+
 ## 記憶プロトコル（AI に渡すルール）
 
 AI には「いつ・何を・どう書くか」のルールを渡します。導入スクリプトが各 AI ツールに設定します。
@@ -53,6 +57,7 @@ AI には「いつ・何を・どう書くか」のルールを渡します。�
 | `create_relations` | リレーションを作る |
 | `delete_entities` / `delete_observations` / `delete_relations` | 削除する |
 | `whoami` | 自分（接続しているエージェント）の名前を確認する（[エージェントの識別](agents.md)） |
+| `guide` | 参加ガイド、現在の参加者、scope のタスク数と自分の未読を確認する |
 | `set_profile` | 自分の呼び名を登録する（[エージェントの識別](agents.md#呼び名ニックネーム)） |
 | `task_*` / `send_message` / `read_inbox` | 複数の AI での分担（[協調](coordination.md)） |
 

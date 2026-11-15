@@ -50,7 +50,7 @@ AI:     （記憶に追記）「ヘッダーの前後の空白で認証が失敗
 記憶は **D1**（データベース）に保存されます。操作には Cloudflare のコマンド **wrangler** を使います。
 無料プランで上限に達しても、その日のリクエストが失敗するだけで、勝手に課金されることはありません。
 
-記憶の形（エンティティ・observation など）や AI に渡すルールは [docs/memory-model.md](docs/memory-model.md) で説明しています。
+記憶の形（エンティティ・observation など）や AI に渡すルールは [docs/memory-model.md](docs/memory-model.md) で説明しています。AI は接続後に `whoami` を確認し、初回または更新案内があれば `guide` を読んでください。
 
 ---
 

@@ -78,6 +78,7 @@ await test('initialize と tools/list', async () => {
   const tools = await post(P, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const names = tools.body.result.tools.map((t) => t.name);
   assert.ok(names.includes('search_nodes'));
+  assert.ok(names.includes('guide'));
   assert.ok(!names.includes('read_graph'));
 });
 
@@ -248,7 +249,8 @@ async function tool(token, name, args, path = P) {
   const { status, body } = await post(path, { jsonrpc: '2.0', id: nextId++, method: 'tools/call', params: { name, arguments: args } }, token);
   assert.equal(status, 200);
   const r = body.result;
-  return r.isError ? { error: r.content[0].text } : JSON.parse(r.content[0].text);
+  if (r.isError) return { error: r.content[0].text };
+  try { return JSON.parse(r.content[0].text); } catch { return r.content[0].text; }
 }
 
 await test('タスクを作って一覧できる（説明文は一覧に出ない）', async () => {
@@ -656,7 +658,42 @@ await test('OAuth の書き手にはアプリ名が付く。宛先にも使え�
 await test('initialize の instructions に記憶と協調のルールの要点が入る', async () => {
   const init = await post(G, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } });
   const text = init.body.result.instructions;
-  for (const w of ['whoami', 'read_inbox', 'search_nodes', 'task_claim', 'Person:owner']) assert.ok(text.includes(w), w);
+  for (const w of ['whoami', 'read_inbox', 'search_nodes', 'task_claim', 'guide', 'Person:owner']) assert.ok(text.includes(w), w);
+  assert.ok(init.body.result.capabilities.resources);
+  assert.ok(init.body.result.capabilities.prompts);
+});
+
+await test('guide: 初回ヒント、ガイド内容、訪問記録、resource/prompt', async () => {
+  const token = (await admin('POST', '/admin/agents', { name: 'guide-test' })).body.token;
+  const who = await tool(token, 'whoami', {}, P);
+  assert.equal(who.firstVisit, true);
+  assert.match(who.guideHint, /初めて/);
+  assert.equal(who.guideVersion, '1.0.0');
+
+  const guide = await tool(token, 'guide', {}, P);
+  assert.match(guide, /ガイド版: 1\.0\.0/);
+  assert.match(guide, /秘密情報/);
+  assert.match(guide, /Project:myapp/);
+  assert.match(guide, /guide-test/);
+  const after = await tool(token, 'whoami', {}, P);
+  assert.equal(after.firstVisit, undefined);
+  assert.equal(after.guideHint, undefined);
+
+  const resourceList = await post(P, { jsonrpc: '2.0', id: nextId++, method: 'resources/list' }, token);
+  assert.equal(resourceList.body.result.resources[0].uri, 'memory://guide');
+  const resource = await post(P, { jsonrpc: '2.0', id: nextId++, method: 'resources/read', params: { uri: 'memory://guide' } }, token);
+  assert.match(resource.body.result.contents[0].text, /ガイド版/);
+  const prompts = await post(P, { jsonrpc: '2.0', id: nextId++, method: 'prompts/list' }, token);
+  assert.equal(prompts.body.result.prompts[0].name, 'memory-onboarding');
+  const prompt = await post(P, { jsonrpc: '2.0', id: nextId++, method: 'prompts/get', params: { name: 'memory-onboarding' } }, token);
+  assert.match(prompt.body.result.messages[0].content.text, /まず guide/);
+
+  env.DB.db.prepare("UPDATE guide_reads SET version = '0.0.0' WHERE identity = 'guide-test' AND scope = 'p:myapp'").run();
+  const stale = await tool(token, 'whoami', {}, P);
+  assert.equal(stale.firstVisit, undefined);
+  assert.match(stale.guideHint, /更新/);
+  await tool(token, 'guide', {}, P);
+  assert.equal((await tool(token, 'whoami', {}, P)).guideHint, undefined);
 });
 
 console.log(`\n${passed} 件のテストに成功しました`);
