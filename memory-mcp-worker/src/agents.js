@@ -4,7 +4,8 @@
  * 誰がリクエストしたか（identity）を、次の 3 種類で表します。
  *   admin … MEMORY_TOKEN（管理者。エージェントの発行・失効もできる）。name は "owner"
  *   agent … エージェントごとのトークン（mca_ で始まる）。name は発行時に付けた名前
- *   user  … OAuth でログインした人。name は "github:<ユーザー名>"
+ *   user  … OAuth でログインした人。name は "github:<ユーザー名>/<アプリ名>"（例 github:alice/chatgpt）。
+ *           アプリ名は接続元の自己申告で、わからなければ "github:<ユーザー名>"
  *
  * 管理用のエンドポイント（MEMORY_TOKEN でだけ使える）
  *   GET    /admin/agents          一覧
@@ -19,8 +20,21 @@ export function adminIdentity() {
   return { kind: 'admin', name: 'owner' };
 }
 
-export function userIdentity(login) {
-  return { kind: 'user', name: `github:${login}` };
+export function userIdentity(login, clientName) {
+  const client = clientSlug(clientName);
+  return { kind: 'user', name: client ? `github:${login}/${client}` : `github:${login}` };
+}
+
+/** アプリ名を書き手のラベル用に整える（例 "ChatGPT" → "chatgpt"、"Claude Desktop" → "claude-desktop"） */
+export function clientSlug(name) {
+  if (typeof name !== 'string') return '';
+  return name
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^[-._]+|[-._]+$/g, '')
+    .slice(0, 32)
+    .replace(/[-._]+$/, '');
 }
 
 /** Authorization ヘッダーの Bearer トークンを取り出す */

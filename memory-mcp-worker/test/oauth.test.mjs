@@ -284,14 +284,14 @@ try {
     assert.equal(data.entities.length, 1);
   });
 
-  await test('OAuth のユーザーは github:<ユーザー名> として記録される', async () => {
+  await test('OAuth のユーザーは github:<ユーザー名>/<アプリ名> として記録される', async () => {
     const res = await fetch(`${ORIGIN}/mcp/global`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokens.access_token}` },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'whoami', arguments: {} } }),
     });
     const me = JSON.parse((await res.json()).result.content[0].text);
-    assert.equal(me.name, 'github:Alice');
+    assert.equal(me.name, 'github:Alice/test-script', 'アプリ名 "Test <script>" を整えたもの');
     assert.equal(me.kind, 'user');
   });
 

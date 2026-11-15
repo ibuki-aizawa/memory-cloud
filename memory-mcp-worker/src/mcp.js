@@ -381,10 +381,36 @@ async function handleMessage(msg, ctx) {
   }
 }
 
+/**
+ * 接続したときに AI へ渡す説明（MCP の instructions）。
+ * ルールファイル（CLAUDE.md / AGENTS.md）を読めない Web 版・モバイル版のチャットでも同じ動きになるよう、要点をここに書く。
+ * どこまで従うかはクライアント次第なので、詳しいルールはこれまでどおりルールファイルに置く。
+ */
 function scopeInstructions(scope) {
-  return scope === 'global'
-    ? 'プロジェクト横断の共通ナレッジ（Lesson / Convention / Tech / Person）。プロジェクト固有の内容は書かない。'
-    : `プロジェクト ${scope.slice(2)} のナレッジ。まず open_nodes ["Project:${scope.slice(2)}"] でハブを確認する。`;
+  const common = [
+    '記憶の使い方:',
+    '- 会話の始めに whoami を 1 回呼ぶ。unreadMessages があれば read_inbox、myActiveTasks があれば task_list { mine: true } を確認する',
+    '- 必要になったら search_nodes で探す（上位 10 件と抜粋だけ返る）。全文が要るものだけ open_nodes で開く。read_graph はない',
+    '- 保存するのは今後も使う事実・決定・教訓だけ。会話や作業のログは保存しない',
+    '- 保存前に search_nodes で重複を確認し、既存のエンティティには add_observations で足す',
+    '- 名前は 種別:スコープ/名前（例 Decision:myapp/use-sqlite）。observation は "[YYYY-MM-DD 書き手] 1文"。書き手は whoami の name',
+    '- 決定を覆すときは削除せず、新しい Decision を作って supersedes で結ぶ',
+    '協調（ほかの AI と分担するとき）:',
+    '- 作業する前に task_claim で引き受ける。ほかの AI が担当中のタスクには手を出さない',
+    '- 長い作業では task_update で note を残す。終わったら done にするか、task_handoff でレビューを頼む',
+  ];
+  if (scope === 'global') {
+    return [
+      'このスコープはプロジェクト横断の共通ナレッジ（Lesson / Convention / Tech / Person）。プロジェクト固有の内容は書かない。',
+      'ユーザーの好みや前提が必要なときは open_nodes ["Person:owner"] を確認する。',
+      ...common,
+    ].join('\n');
+  }
+  const slug = scope.slice(2);
+  return [
+    `このスコープはプロジェクト ${slug} のナレッジとタスクボード。まず open_nodes ["Project:${slug}"] でハブを確認する。`,
+    ...common,
+  ].join('\n');
 }
 
 async function callTool(name, args, ctx) {
@@ -960,7 +986,7 @@ async function addEvent(db, id, actor, kind, status, note) {
 /** 宛先のエージェント名。発行済みのエージェント・owner・github:<名前> だけを受け付ける（打ち間違いで届かないのを防ぐ） */
 async function agentName(db, value, field) {
   const name = str(value, field, MAX_AGENT_NAME);
-  if (name === 'owner' || /^github:[A-Za-z0-9-]+$/.test(name)) return name;
+  if (name === 'owner' || /^github:[A-Za-z0-9-]+(\/[a-z0-9._-]+)?$/.test(name)) return name;
   const row = await db.prepare('SELECT name FROM agents WHERE name = ?1 AND revoked_at IS NULL').bind(name).first();
   if (row) return name;
   const { results } = await db.prepare('SELECT name FROM agents WHERE revoked_at IS NULL ORDER BY name').all();

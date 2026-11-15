@@ -59,7 +59,7 @@ const oauthMcpHandler = {
     if (!isAllowedUser(env, ctx.props && ctx.props.login)) {
       return Response.json({ error: 'forbidden' }, { status: 403 });
     }
-    return handleMcp(request, env, scope, userIdentity(ctx.props.login));
+    return handleMcp(request, env, scope, userIdentity(ctx.props.login, ctx.props.clientName));
   },
 };
 

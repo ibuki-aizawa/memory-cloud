@@ -146,12 +146,20 @@ async function githubCallback(request, env, oauth, origin) {
     );
   }
 
+  // 書き手を AI ツールごとに区別するため、接続元のアプリ名も覚えておく（アプリの自己申告。表示用のラベル）
+  let clientName = null;
+  try {
+    clientName = (await oauth.describeConsent(original)).clientName || null;
+  } catch {
+    // 取得できなくても接続は続ける（書き手は github:<ユーザー名> になる）
+  }
+
   const { redirectTo } = await oauth.completeAuthorization({
     request: original,
     userId: `github-${user.id}`, // ライブラリの制約で ":" は使えない
     metadata: { login: user.login },
     scope: original.scope,
-    props: { login: user.login, githubId: user.id }, // GitHub のトークンは保存しない
+    props: { login: user.login, githubId: user.id, clientName }, // GitHub のトークンは保存しない
   });
   headers.set('Location', redirectTo);
   return new Response(null, { status: 302, headers });

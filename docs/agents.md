@@ -11,7 +11,7 @@ AI ツールごとに専用のトークン（`mca_` で始まる）を発行し�
 |---|---|
 | エージェントのトークン | 発行時の名前（例: `claude-mypc`、`codex-mypc`） |
 | 管理者トークン（`MEMORY_TOKEN`） | `owner` |
-| OAuth（GitHub でログイン） | `github:<ユーザー名>` |
+| OAuth（GitHub でログイン） | `github:<ユーザー名>/<アプリ名>`（例: `github:alice/chatgpt`。アプリ名は接続元の自己申告） |
 
 - エンティティ・observation・リレーションを書き込むと、サーバーが書き手と日時を自動で記録します
 - AI は `whoami` ツールで自分の名前を確認できます。記憶のルールでは、observation の `[日付 書き手]` にこの名前を使います

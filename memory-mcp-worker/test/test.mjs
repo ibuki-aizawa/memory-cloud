@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, readdirSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import worker from '../src/mcp.js';
+import { clientSlug, userIdentity } from '../src/agents.js';
 
 // --- D1 互換の最小シム ------------------------------------------------------
 class Stmt {
@@ -364,6 +365,24 @@ await test('協調ツールの入力エラー', async () => {
   assert.ok((await tool(claudeTok, 'task_update', { id: 1 })).error, 'status も note もない');
   assert.ok((await tool(claudeTok, 'task_update', { id: 1, status: 'wip' })).error);
   assert.ok((await tool(claudeTok, 'task_list', { status: 'wip' })).error);
+});
+
+await test('OAuth の書き手にはアプリ名が付く。宛先にも使える', async () => {
+  assert.equal(clientSlug('ChatGPT'), 'chatgpt');
+  assert.equal(clientSlug('Claude Desktop'), 'claude-desktop');
+  assert.equal(clientSlug('<script>'), 'script');
+  assert.equal(clientSlug(''), '');
+  assert.equal(clientSlug('x'.repeat(50)).length, 32);
+  assert.equal(userIdentity('alice', 'ChatGPT').name, 'github:alice/chatgpt');
+  assert.equal(userIdentity('alice', null).name, 'github:alice', 'アプリ名がわからなければユーザー名だけ');
+  assert.equal((await tool(claudeTok, 'send_message', { to: 'github:alice/chatgpt', body: 'hi' })).sent, true);
+  assert.ok((await tool(claudeTok, 'send_message', { to: 'github:alice/Chat GPT', body: 'hi' })).error);
+});
+
+await test('initialize の instructions に記憶と協調のルールの要点が入る', async () => {
+  const init = await post(G, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } });
+  const text = init.body.result.instructions;
+  for (const w of ['whoami', 'read_inbox', 'search_nodes', 'task_claim', 'Person:owner']) assert.ok(text.includes(w), w);
 });
 
 console.log(`\n${passed} 件のテストに成功しました`);
