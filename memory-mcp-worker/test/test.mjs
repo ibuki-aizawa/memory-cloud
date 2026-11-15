@@ -490,8 +490,7 @@ await test('返信不要のメッセージ（kind: info）は unreadRequests に
 
 // --- Web の確認画面 ---------------------------------------------------------
 
-const kvStore = new Map();
-const dashEnv = { ...env, OAUTH_KV: { get: async (k) => kvStore.get(k) ?? null, put: async (k, v) => { kvStore.set(k, v); } } };
+const dashEnv = env;
 async function dash(method, path, { cookie, form, origin = 'https://example.com', ip = '198.51.100.1' } = {}) {
   const headers = { 'CF-Connecting-IP': ip };
   if (cookie) headers.Cookie = cookie;
@@ -515,6 +514,7 @@ await test('確認画面: 未ログインはログイン画面、トークンが
   assert.equal(ok.status, 303);
   const setCookie = ok.headers.get('set-cookie');
   for (const attr of ['HttpOnly', 'SameSite=Strict', 'Secure', 'Path=/dashboard', 'Max-Age=28800']) assert.ok(setCookie.includes(attr), attr);
+  assert.match(setCookie.split(';')[0], /^mc_dash=[A-Za-z0-9_-]{43}$/, 'Cookie にはランダムな ID だけ');
   assert.ok(!setCookie.includes('test-token'), 'Cookie にトークンは入らない');
   dashCookie = setCookie.split(';')[0];
 });
@@ -551,20 +551,58 @@ await test('確認画面: メッセージはページングできる', async () 
   assert.ok(!first.text.includes('ページ 0<'));
 });
 
-await test('確認画面: 偽の Cookie・別サイトからの POST・試行の繰り返しは拒否、ログアウトで Cookie を消す', async () => {
+await test('確認画面: 偽の Cookie・別サイトからの POST・試行の繰り返しは拒否', async () => {
+  assert.equal((await dash('GET', '/dashboard/agents', { cookie: 'mc_dash=' + 'A'.repeat(43) })).status, 302, '記録のない ID');
   assert.equal((await dash('GET', '/dashboard/agents', { cookie: 'mc_dash=v1.9999999999.forged' })).status, 302);
-  const [, exp] = dashCookie.match(/v1\.(\d+)\./);
-  assert.equal((await dash('GET', '/dashboard/agents', { cookie: dashCookie.replace(exp, String(Number(exp) + 1)) })).status, 302, '期限を書き換えると署名が合わない');
+  assert.ok(!JSON.stringify(env.DB.db.prepare('SELECT * FROM dashboard_sessions').all()).includes(dashCookie.split('=')[1]), 'D1 には ID のハッシュだけ');
   assert.equal((await dash('POST', '/dashboard/login', { form: { token: 'test-token' }, origin: 'https://evil.example' })).status, 403);
   assert.equal((await dash('POST', '/dashboard/login', { form: { token: 'test-token' }, origin: null })).status, 403, 'Origin がなければ拒否');
 
-  for (let i = 0; i < 10; i++) await dash('POST', '/dashboard/login', { form: { token: 'bad' }, ip: '203.0.113.9' });
-  assert.equal((await dash('POST', '/dashboard/login', { form: { token: 'test-token' }, ip: '203.0.113.9' })).status, 429, '失敗が続いたら正しくても待たせる');
+  // 同時に送っても 10 回を超えて試せない
+  const burst = await Promise.all(Array.from({ length: 15 }, () => dash('POST', '/dashboard/login', { form: { token: 'bad' }, ip: '203.0.113.9' })));
+  assert.equal(burst.filter((r) => r.status === 401).length, 10);
+  assert.equal(burst.filter((r) => r.status === 429).length, 5);
+  assert.equal((await dash('POST', '/dashboard/login', { form: { token: 'test-token' }, ip: '203.0.113.9' })).status, 429, '上限のあとは正しくても待たせる');
+  env.DB.db.prepare("UPDATE dashboard_login_attempts SET window_start = datetime('now', '-11 minutes') WHERE ip = '203.0.113.9'").run();
+  assert.equal((await dash('POST', '/dashboard/login', { form: { token: 'test-token' }, ip: '203.0.113.9' })).status, 303, '10 分たてば試せる');
   assert.equal((await dash('POST', '/dashboard/login', { form: { token: 'test-token' }, ip: '198.51.100.2' })).status, 303, 'ほかの IP は影響しない');
+});
 
+await test('確認画面: HTTP は HTTPS に転送（localhost は除く）', async () => {
+  const res = await worker.fetch(new Request('http://example.com/dashboard/tasks?scope=global', { redirect: 'manual' }), dashEnv);
+  assert.equal(res.status, 301);
+  assert.equal(res.headers.get('location'), 'https://example.com/dashboard/tasks?scope=global');
+  const post = await worker.fetch(new Request('http://example.com/dashboard/login', { method: 'POST', headers: { Origin: 'http://example.com' }, body: new URLSearchParams({ token: 'test-token' }) }), dashEnv);
+  assert.equal(post.status, 403, 'HTTP ではトークンを受け付けない');
+  assert.equal((await worker.fetch(new Request('http://localhost/dashboard'), dashEnv)).status, 200);
+});
+
+await test('確認画面: ログアウトするとコピーした Cookie も使えない。すべてのブラウザからのログアウト', async () => {
+  const copy = dashCookie;
   const out = await dash('POST', '/dashboard/logout', { cookie: dashCookie });
   assert.equal(out.status, 303);
   assert.ok(out.headers.get('set-cookie').includes('Max-Age=0'));
+  assert.equal((await dash('GET', '/dashboard/agents', { cookie: copy })).status, 302, 'コピーした Cookie も無効');
+
+  const login = async () => (await dash('POST', '/dashboard/login', { form: { token: 'test-token' }, ip: '198.51.100.3' })).headers.get('set-cookie').split(';')[0];
+  const a = await login();
+  const b = await login();
+  assert.equal((await dash('GET', '/dashboard/agents', { cookie: b })).status, 200);
+  await dash('POST', '/dashboard/logout', { cookie: a, form: { all: '1' } });
+  assert.equal((await dash('GET', '/dashboard/agents', { cookie: b })).status, 302, 'ほかのブラウザのログインも消える');
+  dashCookie = await login();
+});
+
+await test('確認画面: タスクは状態ごとにページングして見られる', async () => {
+  for (let i = 0; i < 35; i++) await tool(claudeTok, 'task_create', { title: `たくさんのタスク ${i}` }, G);
+  const board = await dash('GET', '/dashboard/tasks?scope=global', { cookie: dashCookie });
+  const link = board.text.includes('href="/dashboard/tasks?scope=global&amp;status=open"');
+  assert.ok(link, 'すべて見るのリンク');
+  const list = await dash('GET', '/dashboard/tasks?scope=global&status=open', { cookie: dashCookie });
+  assert.equal(list.status, 200);
+  assert.ok(list.text.includes('たくさんのタスク 34'));
+  assert.ok(list.text.includes('たくさんのタスク 0'), '50 件以内なので最後まで見える');
+  assert.equal((await dash('GET', '/dashboard/tasks?scope=global&status=wip', { cookie: dashCookie })).status, 400);
 });
 
 await test('協調ツールの入力エラー', async () => {

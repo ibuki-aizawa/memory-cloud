@@ -4,17 +4,18 @@
  *
  *   GET  /dashboard                  概要（スコープごとの件数）。未ログインならログイン画面
  *   POST /dashboard/login            管理者トークンを確かめて、セッションの Cookie を発行する
- *   POST /dashboard/logout           ログアウト
- *   GET  /dashboard/tasks?scope=     タスクの一覧（状態ごと）
+ *   POST /dashboard/logout           ログアウト（all=1 なら、すべてのブラウザのログインを消す）
+ *   GET  /dashboard/tasks?scope=     タスクの一覧（状態ごと）。status= で 1 つの状態をページングして見る
  *   GET  /dashboard/tasks/<id>?scope= タスクの詳細（経過と関係するメッセージ）
  *   GET  /dashboard/messages?scope=  メッセージのやり取り（新しい順、ページング）
  *   GET  /dashboard/memory?scope=    記憶の書き込み（誰がいつ書いたか、新しい順、ページング）
  *   GET  /dashboard/agents           エージェントと呼び名
  *
- * セキュリティ
- *   - セッションは署名付きの HttpOnly / Secure / SameSite=Strict の Cookie（有効期限 8 時間）。トークン自体は Cookie に入れない
- *   - 署名鍵は DASHBOARD_SECRET（任意）か、MEMORY_TOKEN から用途を分けて作った鍵。MEMORY_TOKEN を変えるとセッションは無効になる
- *   - ログインの失敗は IP ごとに数える（OAUTH_KV があるとき。10 分に 10 回まで）
+ * セキュリティ（タスク #4・#5 での Codex の意見を反映）
+ *   - HTTPS だけ（localhost を除く）。HTTP で来たら HTTPS に転送する
+ *   - セッションはサーバー側（D1 の dashboard_sessions）に記録し、Cookie にはランダムな ID だけを入れる（D1 にはそのハッシュ）。
+ *     ログアウトで消すので、コピーされた Cookie も使えなくなる。Cookie は HttpOnly / Secure / SameSite=Strict、有効期限 8 時間
+ *   - ログインの試行は IP ごとに 10 分で 10 回まで。1 回の UPDATE で数えるので、同時に送られても上限を超えない
  *   - POST は同じオリジンからだけ受け付ける。画面は CSP で外部の読み込み・スクリプトを禁止し、表示する値はすべてエスケープする
  *   - 読み取り専用。トークンやそのハッシュは表示しない
  */
@@ -22,8 +23,10 @@
 const COOKIE = 'mc_dash';
 const SESSION_SECONDS = 8 * 60 * 60;
 const LOGIN_WINDOW_SECONDS = 600;
-const LOGIN_MAX_FAILURES = 10;
+const LOGIN_MAX_ATTEMPTS = 10;
 const PAGE_SIZE = 50;
+const BOARD_COLUMN_LIMIT = 30;  // タスクの一覧で、状態ごとに表示する件数
+const DETAIL_LIMIT = 200;       // タスクの詳細で表示する経過・メッセージの件数（新しいもの）
 const SCOPE_RE = /^(global|p:[a-z0-9][a-z0-9-]{0,62})$/;
 const ACTIVE = ['open', 'in_progress', 'review'];
 const STATUS_LABEL = { open: '未着手', in_progress: '作業中', review: 'レビュー', done: '完了', cancelled: '取りやめ' };
@@ -36,16 +39,22 @@ export async function handleDashboard(request, env) {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/dashboard';
   if (!env.MEMORY_TOKEN) return html(503, '確認画面は使えません', '<p>MEMORY_TOKEN が設定されていません。</p>');
+  if (url.protocol !== 'https:' && !isLocalhost(url.hostname)) {
+    // トークンを暗号化なしで送らせない
+    if (request.method !== 'GET') return html(403, 'HTTPS で開いてください', '');
+    url.protocol = 'https:';
+    return new Response(null, { status: 301, headers: { Location: url.toString() } });
+  }
 
   if (request.method === 'POST') {
     if (!sameOrigin(request, url)) return html(403, '受け付けられません', '<p>別のサイトからの送信は受け付けません。</p>');
-    if (path === '/dashboard/login') return login(request, env, url);
-    if (path === '/dashboard/logout') return logout();
+    if (path === '/dashboard/login') return login(request, env);
+    if (path === '/dashboard/logout') return logout(request, env);
     return html(404, '見つかりません', '');
   }
   if (request.method !== 'GET') return new Response(null, { status: 405, headers: { Allow: 'GET, POST' } });
 
-  if (!(await validSession(request, env))) {
+  if (!(await validSession(request, env.DB))) {
     return path === '/dashboard'
       ? loginPage()
       : new Response(null, { status: 302, headers: { Location: '/dashboard', 'Cache-Control': 'no-store' } });
@@ -75,13 +84,22 @@ export async function handleDashboard(request, env) {
 // ログイン
 // ---------------------------------------------------------------------------
 
-async function login(request, env, url) {
+async function login(request, env) {
+  const db = env.DB;
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  const kv = env.OAUTH_KV;
-  const failKey = `dashboard-login-fail:${ip}`;
-  const failures = kv ? Number((await kv.get(failKey)) || 0) : 0;
-  if (failures >= LOGIN_MAX_FAILURES) {
-    return loginPage('失敗が続いたので、しばらく（10 分ほど）待ってからやり直してください。', 429);
+  // 試行を先に数える（正しいトークンでも数える）。区切りの 10 分を過ぎていたら 1 からやり直す
+  const counted = await db
+    .prepare(
+      `INSERT INTO dashboard_login_attempts (ip, attempts, window_start) VALUES (?1, 1, datetime('now'))
+       ON CONFLICT (ip) DO UPDATE SET
+         attempts = CASE WHEN window_start <= datetime('now', '-${LOGIN_WINDOW_SECONDS} seconds') THEN 1 ELSE attempts + 1 END,
+         window_start = CASE WHEN window_start <= datetime('now', '-${LOGIN_WINDOW_SECONDS} seconds') THEN datetime('now') ELSE window_start END
+       RETURNING attempts`
+    )
+    .bind(ip)
+    .first();
+  if (counted.attempts > LOGIN_MAX_ATTEMPTS) {
+    return loginPage('ログインの試行が多すぎます。10 分ほど待ってからやり直してください。', 429);
   }
 
   let token = '';
@@ -91,59 +109,72 @@ async function login(request, env, url) {
   } catch {
     // 空として扱う
   }
-  if (!token || !equalText(token, env.MEMORY_TOKEN)) {
-    if (kv) await kv.put(failKey, String(failures + 1), { expirationTtl: LOGIN_WINDOW_SECONDS });
-    return loginPage('管理者トークンが違います。', 401);
+  if (!token || !equalText(token, env.MEMORY_TOKEN)) return loginPage('管理者トークンが違います。', 401);
+
+  const id = b64url(crypto.getRandomValues(new Uint8Array(32)));
+  await db.batch([
+    db.prepare("DELETE FROM dashboard_sessions WHERE expires_at <= datetime('now')"),
+    db.prepare(`INSERT INTO dashboard_sessions (id_hash, expires_at) VALUES (?1, datetime('now', '+${SESSION_SECONDS} seconds'))`).bind(await sha256(id)),
+    db.prepare('DELETE FROM dashboard_login_attempts WHERE ip = ?1').bind(ip),
+  ]);
+  return new Response(null, {
+    status: 303,
+    headers: {
+      Location: '/dashboard',
+      'Set-Cookie': `${COOKIE}=${id}; Path=/dashboard; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_SECONDS}`,
+      'Cache-Control': 'no-store',
+    },
+  });
+}
+
+async function logout(request, env) {
+  const db = env.DB;
+  const id = sessionId(request);
+  let all = false;
+  try {
+    all = (await request.formData()).get('all') === '1';
+  } catch {
+    // 通常のログアウト
   }
-
-  const exp = Math.floor(Date.now() / 1000) + SESSION_SECONDS;
-  const value = `v1.${exp}`;
-  const sig = await sign(env, value);
-  const secure = url.protocol === 'https:' ? '; Secure' : '';
+  // すべてのブラウザから消すのは、ログイン中のブラウザからだけ
+  if (all && (await validSession(request, db))) await db.prepare('DELETE FROM dashboard_sessions').run();
+  else if (id) await db.prepare('DELETE FROM dashboard_sessions WHERE id_hash = ?1').bind(await sha256(id)).run();
   return new Response(null, {
     status: 303,
     headers: {
       Location: '/dashboard',
-      'Set-Cookie': `${COOKIE}=${value}.${sig}; Path=/dashboard; HttpOnly; SameSite=Strict; Max-Age=${SESSION_SECONDS}${secure}`,
+      'Set-Cookie': `${COOKIE}=; Path=/dashboard; HttpOnly; Secure; SameSite=Strict; Max-Age=0`,
       'Cache-Control': 'no-store',
     },
   });
 }
 
-function logout() {
-  return new Response(null, {
-    status: 303,
-    headers: {
-      Location: '/dashboard',
-      'Set-Cookie': `${COOKIE}=; Path=/dashboard; HttpOnly; SameSite=Strict; Max-Age=0`,
-      'Cache-Control': 'no-store',
-    },
-  });
-}
-
-async function validSession(request, env) {
+function sessionId(request) {
   const cookie = (request.headers.get('Cookie') || '')
     .split(';')
     .map((c) => c.trim())
     .find((c) => c.startsWith(`${COOKIE}=`));
-  if (!cookie) return false;
-  const m = cookie.slice(COOKIE.length + 1).match(/^(v1\.(\d+))\.([A-Za-z0-9_-]+)$/);
-  if (!m) return false;
-  if (Number(m[2]) < Date.now() / 1000) return false;
-  return equalText(m[3], await sign(env, m[1]));
+  const id = cookie && cookie.slice(COOKIE.length + 1);
+  return id && /^[A-Za-z0-9_-]{43}$/.test(id) ? id : null;
 }
 
-/** 署名鍵: DASHBOARD_SECRET があればそれ、なければ MEMORY_TOKEN から用途を分けて作る */
-async function sign(env, value) {
-  const keyMaterial = env.DASHBOARD_SECRET
-    ? new TextEncoder().encode(env.DASHBOARD_SECRET)
-    : await hmac(new TextEncoder().encode(env.MEMORY_TOKEN), 'memory-mcp dashboard session key v1');
-  return b64url(await hmac(keyMaterial, value));
+async function validSession(request, db) {
+  const id = sessionId(request);
+  if (!id) return false;
+  const row = await db
+    .prepare("SELECT 1 AS ok FROM dashboard_sessions WHERE id_hash = ?1 AND expires_at > datetime('now')")
+    .bind(await sha256(id))
+    .first();
+  return !!row;
 }
 
-async function hmac(keyBytes, message) {
-  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  return new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message)));
+async function sha256(value) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function isLocalhost(hostname) {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
 }
 
 function equalText(a, b) {
@@ -210,36 +241,76 @@ async function overview({ db }) {
   return html(200, '概要', body);
 }
 
-async function tasksPage({ db, scope, nick, tz }) {
-  const cols = `id, title, status, assignee, lease_expires_at, created_by, updated_at,
-    (lease_expires_at IS NOT NULL AND lease_expires_at <= datetime('now')) AS expired`;
-  const { results: active } = await db
-    .prepare(`SELECT ${cols} FROM tasks WHERE scope = ?1 AND status IN ('open', 'in_progress', 'review') ORDER BY updated_at DESC, id DESC LIMIT 200`)
-    .bind(scope)
-    .all();
-  const { results: closed } = await db
-    .prepare(`SELECT ${cols} FROM tasks WHERE scope = ?1 AND status IN ('done', 'cancelled') ORDER BY updated_at DESC, id DESC LIMIT 20`)
-    .bind(scope)
-    .all();
+const TASK_COLS = `id, title, status, assignee, lease_expires_at, created_by, updated_at,
+  (lease_expires_at IS NOT NULL AND lease_expires_at <= datetime('now')) AS expired`;
 
-  const card = (t) => `<li class="card">
+function taskCard(t, scope, nick, tz) {
+  return `<li class="card">
   <a href="/dashboard/tasks/${t.id}?scope=${encodeURIComponent(scope)}">#${t.id} ${esc(t.title)}</a>
   <div class="meta">${t.assignee ? `担当 ${who(t.assignee, nick)}` : '<span class="muted">未担当</span>'}
     ${t.expired && ACTIVE.includes(t.status) ? '<span class="badge warn">期限切れ</span>' : ''}
     <span class="muted">· ${esc(time(t.updated_at, tz))}</span></div>
 </li>`;
-  const column = (status, list) => `<section class="col">
-  <h2>${STATUS_LABEL[status]} <span class="muted">${list.length}</span></h2>
-  <ul class="cards">${list.map(card).join('') || '<li class="muted">なし</li>'}</ul>
-</section>`;
+}
 
+async function tasksPage(ctx) {
+  const { db, scope, nick, tz, url } = ctx;
+  const status = url.searchParams.get('status');
+  if (status) return taskStatusPage(ctx, status);
+
+  const { results: counts } = await db
+    .prepare('SELECT status, COUNT(*) AS n FROM tasks WHERE scope = ?1 GROUP BY status')
+    .bind(scope)
+    .all();
+  const total = Object.fromEntries(counts.map((c) => [c.status, c.n]));
+  const column = async (st, label, statuses) => {
+    const { results } = await db
+      .prepare(
+        `SELECT ${TASK_COLS} FROM tasks WHERE scope = ?1 AND status IN (SELECT value FROM json_each(?2))
+         ORDER BY updated_at DESC, id DESC LIMIT ${BOARD_COLUMN_LIMIT}`
+      )
+      .bind(scope, JSON.stringify(statuses))
+      .all();
+    const n = statuses.reduce((sum, x) => sum + (total[x] || 0), 0);
+    const more = n > results.length
+      ? `<p><a href="/dashboard/tasks?scope=${encodeURIComponent(scope)}&amp;status=${st}">すべて見る（${n} 件）</a></p>`
+      : '';
+    return `<section class="col">
+  <h2>${label} <span class="muted">${n}</span></h2>
+  <ul class="cards">${results.map((t) => taskCard(t, scope, nick, tz)).join('') || '<li class="muted">なし</li>'}</ul>
+  ${more}
+</section>`;
+  };
+  const columns = await Promise.all([
+    ...ACTIVE.map((st) => column(st, STATUS_LABEL[st], [st])),
+    column('closed', '完了・取りやめ', ['done', 'cancelled']),
+  ]);
   const body = `${scopeNav(scope, 'tasks')}
 <div class="board">
-${ACTIVE.map((s) => column(s, active.filter((t) => t.status === s))).join('\n')}
-${column('done', closed)}
+${columns.join('\n')}
 </div>
-<p class="muted">完了・取りやめは新しい 20 件だけを表示しています。</p>`;
+<p class="muted">状態ごとに新しい ${BOARD_COLUMN_LIMIT} 件を表示しています。</p>`;
   return html(200, `タスク — ${scopeLabel(scope)}`, body);
+}
+
+/** 1 つの状態のタスクを、新しい順にページングして見る */
+async function taskStatusPage({ db, scope, nick, tz, url }, status) {
+  const statuses = status === 'closed' ? ['done', 'cancelled'] : [status];
+  if (!statuses.every((x) => STATUS_LABEL[x])) return html(400, '状態が正しくありません', scopeNav(scope, 'tasks'));
+  const before = pageCursor(url);
+  const { results } = await db
+    .prepare(
+      `SELECT ${TASK_COLS} FROM tasks WHERE scope = ?1 AND status IN (SELECT value FROM json_each(?2)) ${before ? 'AND id < ?3' : ''}
+       ORDER BY id DESC LIMIT ${PAGE_SIZE + 1}`
+    )
+    .bind(...(before ? [scope, JSON.stringify(statuses), before] : [scope, JSON.stringify(statuses)]))
+    .all();
+  const page = results.slice(0, PAGE_SIZE);
+  const label = status === 'closed' ? '完了・取りやめ' : STATUS_LABEL[status];
+  const body = `${scopeNav(scope, 'tasks')}
+<ul class="cards">${page.map((t) => taskCard(t, scope, nick, tz)).join('') || '<li class="muted">なし</li>'}</ul>
+${results.length > PAGE_SIZE ? nextLink(url, page.at(-1).id) : ''}`;
+  return html(200, `タスク（${label}） — ${scopeLabel(scope)}`, body);
 }
 
 async function taskPage({ db, scope, nick, tz }, id) {
@@ -251,11 +322,18 @@ async function taskPage({ db, scope, nick, tz }, id) {
     .bind(id, scope)
     .first();
   if (!t) return html(404, 'タスクが見つかりません', scopeNav(scope, 'tasks'));
-  const { results: events } = await db.prepare('SELECT * FROM task_events WHERE task_id = ?1 ORDER BY id').bind(id).all();
-  const { results: messages } = await db
-    .prepare('SELECT * FROM messages WHERE task_id = ?1 AND scope = ?2 ORDER BY id')
+  // 新しいものから上限まで取り、古い順に並べ直す
+  const { results: eventsDesc } = await db
+    .prepare(`SELECT * FROM task_events WHERE task_id = ?1 ORDER BY id DESC LIMIT ${DETAIL_LIMIT + 1}`)
+    .bind(id)
+    .all();
+  const { results: messagesDesc } = await db
+    .prepare(`SELECT * FROM messages WHERE task_id = ?1 AND scope = ?2 ORDER BY id DESC LIMIT ${DETAIL_LIMIT + 1}`)
     .bind(id, scope)
     .all();
+  const events = eventsDesc.slice(0, DETAIL_LIMIT).reverse();
+  const messages = messagesDesc.slice(0, DETAIL_LIMIT).reverse();
+  const omitted = (list) => (list.length > DETAIL_LIMIT ? `<p class="muted">古いものは省略しています（新しい ${DETAIL_LIMIT} 件を表示）。</p>` : '');
   const kindLabel = { created: '作成', claimed: '引き受け', updated: '更新', handoff: '引き継ぎ', released: '手放す' };
 
   const body = `${scopeNav(scope, 'tasks')}
@@ -267,6 +345,7 @@ async function taskPage({ db, scope, nick, tz }, id) {
 </dl>
 ${t.description ? `<div class="text">${multiline(t.description)}</div>` : ''}
 <h2>経過</h2>
+${omitted(eventsDesc)}
 <ol class="timeline">${events
     .map(
       (e) => `<li><span class="muted">${esc(time(e.created_at, tz))}</span> ${who(e.actor, nick)}
@@ -274,7 +353,7 @@ ${t.description ? `<div class="text">${multiline(t.description)}</div>` : ''}
   ${e.note ? `<div class="text">${multiline(e.note)}</div>` : ''}</li>`
     )
     .join('')}</ol>
-${messages.length ? `<h2>関係するメッセージ</h2>${messageList(messages, nick, tz, scope)}` : ''}`;
+${messages.length ? `<h2>関係するメッセージ</h2>${omitted(messagesDesc)}${messageList(messages, nick, tz, scope)}` : ''}`;
   return html(200, `#${t.id} ${t.title}`, body);
 }
 
@@ -455,7 +534,8 @@ function html(status, title, body, { nav = true } = {}) {
   ${
     nav
       ? `<nav><a href="/dashboard">概要</a><a href="/dashboard/agents">エージェント</a>
-  <form method="post" action="/dashboard/logout"><button type="submit" class="link">ログアウト</button></form></nav>`
+  <form method="post" action="/dashboard/logout"><button type="submit" class="link">ログアウト</button></form>
+  <form method="post" action="/dashboard/logout"><input type="hidden" name="all" value="1"><button type="submit" class="link muted-link">すべてのブラウザからログアウト</button></form></nav>`
       : ''
   }
 </header>
@@ -521,4 +601,5 @@ code { font-size: .85rem; overflow-wrap: anywhere; }
 .login input { flex: 1 1 260px; padding: 8px; font: inherit; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); }
 button { font: inherit; padding: 8px 16px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
 button.link { padding: 0; border: 0; background: none; color: var(--accent); text-decoration: underline; }
+button.muted-link { color: var(--muted); font-size: .85rem; }
 `;
