@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "memory-project": {
+      "type": "http",
+      "url": "${env:MEMORY_URL}/mcp/p/{{PROJECT}}",
+      "headers": {
+        "Authorization": "Bearer ${env:MEMORY_TOKEN}"
+      }
+    }
+  }
+}

@@ -4,11 +4,13 @@
   プロジェクトを memory-mcp（Cloudflare）に接続します。プロジェクトごとに 1 回だけ実行します。
 
 .DESCRIPTION
-  - CLAUDE.md / .mcp.json / .claude/agents/*.md の {{PROJECT}} をプロジェクト略称に置き換えます
+  - AGENTS.md / CLAUDE.md / 各クライアントの MCP 設定 / .claude/agents/*.md の {{PROJECT}} をプロジェクト略称に置き換えます
+    （.codex/config.toml だけは {{MEMORY_URL}} も実際の URL に置き換えます。Codex は url に環境変数を使えないため）
+    コピーしなかったファイルは無視します
   - 旧ローカル版の memory-project 登録（local スコープ）があれば削除します
   - プロジェクトのハブ（Project:<略称>）と Agent:reviewer を作成します（既にあればスキップ）
   新しい PC や新しい参加者は、このスクリプトを実行する必要はありません
-  （setup-client.ps1 を実行済みなら、clone して Claude Code を起動するだけで参加できます）。
+  （setup-client.ps1 を実行済みなら、clone してエージェントを起動するだけで参加できます）。
 
 .PARAMETER Slug
   プロジェクト略称（英小文字・数字・ハイフン）。省略時はフォルダ名から作ります。
@@ -39,7 +41,10 @@ if ($Slug -notmatch '^[a-z0-9][a-z0-9-]{0,62}$') {
 Write-Host "プロジェクト略称: $Slug"
 
 # 1. {{PROJECT}} の置換
-$targets = @((Join-Path $root 'CLAUDE.md'), (Join-Path $root '.mcp.json'))
+$targets = @(
+    'AGENTS.md', 'CLAUDE.md', '.mcp.json',
+    '.cursor/mcp.json', '.vscode/mcp.json', '.codex/config.toml', '.gemini/settings.json'
+) | ForEach-Object { Join-Path $root $_ }
 $agentsDir = Join-Path $root '.claude/agents'
 if (Test-Path $agentsDir) {
     $targets += Get-ChildItem $agentsDir -Filter '*.md' | ForEach-Object FullName
@@ -47,8 +52,10 @@ if (Test-Path $agentsDir) {
 foreach ($t in $targets) {
     if (-not (Test-Path $t)) { continue }
     $content = Get-Content $t -Raw
-    if ($content -and $content.Contains('{{PROJECT}}')) {
-        $content.Replace('{{PROJECT}}', $Slug) | Set-Content $t -Encoding utf8 -NoNewline
+    if (-not $content) { continue }
+    $updated = $content.Replace('{{PROJECT}}', $Slug).Replace('{{MEMORY_URL}}', $Url)
+    if ($updated -ne $content) {
+        $updated | Set-Content $t -Encoding utf8 -NoNewline
         Write-Host "  置換しました: $t"
     }
 }
@@ -104,6 +111,6 @@ else { Write-Host '  ハブは作成済みです' }
 
 Write-Host ''
 Write-Host '完了しました。次の 2 つを行ってください:'
-Write-Host "  1) Project:$Slug の「概要」を更新する（Claude Code で「Project:$Slug の概要を ○○ に直して」と頼む）"
-Write-Host '  2) CLAUDE.md / .mcp.json / .claude/ を git にコミットする'
-Write-Host 'Claude Code の初回起動時に .mcp.json の memory-project を使うか確認されるので、許可してください。'
+Write-Host "  1) Project:$Slug の「概要」を更新する（エージェントに「Project:$Slug の概要を ○○ に直して」と頼む）"
+Write-Host '  2) AGENTS.md / CLAUDE.md / .mcp.json / .claude/ と、コピーした各クライアントの設定フォルダ（.cursor/ .vscode/ .codex/ .gemini/）を git にコミットする'
+Write-Host '初回起動時に memory-project を使うか確認されるクライアントがあるので、許可してください（Codex はプロジェクトを trusted にする必要があります）。'

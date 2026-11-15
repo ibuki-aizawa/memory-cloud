@@ -1,0 +1,6 @@
+# Codex CLI のプロジェクト設定（プロジェクトを trusted にしたときだけ読まれます）
+# Codex は url に環境変数を使えないため、init-project.ps1 が下の url を実際の URL に書き換えます。
+# トークンは環境変数 MEMORY_TOKEN から読むので、このファイルには入りません。
+[mcp_servers.memory-project]
+url = "{{MEMORY_URL}}/mcp/p/{{PROJECT}}"
+bearer_token_env_var = "MEMORY_TOKEN"

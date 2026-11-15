@@ -1,0 +1,13 @@
+{
+  "context": {
+    "fileName": ["AGENTS.md", "GEMINI.md"]
+  },
+  "mcpServers": {
+    "memory-project": {
+      "httpUrl": "${MEMORY_URL}/mcp/p/{{PROJECT}}",
+      "headers": {
+        "Authorization": "Bearer ${MEMORY_TOKEN}"
+      }
+    }
+  }
+}
