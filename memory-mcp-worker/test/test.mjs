@@ -581,6 +581,20 @@ await test('確認画面: ブラウザが Origin: null を送っても、Sec-Fet
   assert.equal(page.headers.get('referrer-policy'), 'same-origin', 'no-referrer だと Origin が null になる');
 });
 
+await test('確認画面: CF-Connecting-IP がなければログインさせない（共有カウンターで全員が締め出されないように）。期限切れの試行は片付ける', async () => {
+  const res = await worker.fetch(new Request('https://example.com/dashboard/login', {
+    method: 'POST', headers: { Origin: 'https://example.com', 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ token: 'test-token' }), redirect: 'manual',
+  }), dashEnv);
+  assert.equal(res.status, 503);
+  assert.equal(env.DB.db.prepare("SELECT COUNT(*) AS n FROM dashboard_login_attempts WHERE ip = 'unknown'").get().n, 0);
+
+  await dash('POST', '/dashboard/login', { form: { token: 'bad' }, ip: '192.0.2.50' });
+  env.DB.db.prepare("UPDATE dashboard_login_attempts SET window_start = datetime('now', '-11 minutes') WHERE ip = '192.0.2.50'").run();
+  await dash('POST', '/dashboard/login', { form: { token: 'test-token' }, ip: '192.0.2.51' });
+  assert.equal(env.DB.db.prepare("SELECT COUNT(*) AS n FROM dashboard_login_attempts WHERE ip = '192.0.2.50'").get().n, 0, 'ほかの IP の期限切れも消える');
+});
+
 await test('確認画面: HTTP は HTTPS に転送（localhost は除く）', async () => {
   const res = await worker.fetch(new Request('http://example.com/dashboard/tasks?scope=global', { redirect: 'manual' }), dashEnv);
   assert.equal(res.status, 301);

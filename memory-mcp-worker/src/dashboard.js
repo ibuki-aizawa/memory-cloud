@@ -15,7 +15,8 @@
  *   - HTTPS だけ（localhost を除く）。HTTP で来たら HTTPS に転送する
  *   - セッションはサーバー側（D1 の dashboard_sessions）に記録し、Cookie にはランダムな ID だけを入れる（D1 にはそのハッシュ）。
  *     ログアウトで消すので、コピーされた Cookie も使えなくなる。Cookie は HttpOnly / Secure / SameSite=Strict、有効期限 8 時間
- *   - ログインの試行は IP ごとに 10 分で 10 回まで。1 回の UPDATE で数えるので、同時に送られても上限を超えない
+ *   - ログインの試行は IP（CF-Connecting-IP）ごとに 10 分で 10 回まで。1 回の UPDATE で数えるので、同時に送られても上限を超えない。
+ *     CF-Connecting-IP がなければ（Cloudflare を経由しない構成）、localhost を除いてログインさせない
  *   - POST は同じオリジンからだけ受け付ける。画面は CSP で外部の読み込み・スクリプトを禁止し、表示する値はすべてエスケープする
  *   - 読み取り専用。トークンやそのハッシュは表示しない
  */
@@ -86,7 +87,14 @@ export async function handleDashboard(request, env) {
 
 async function login(request, env) {
   const db = env.DB;
-  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  // 試行は接続元の IP ごとに数える。Cloudflare は必ず CF-Connecting-IP を付けるので、ないのは想定外の構成。
+  // 1 つの共有カウンターにすると、誰か 1 人の失敗で全員がログインできなくなるため、ローカルの開発以外では受け付けない
+  const url = new URL(request.url);
+  const ip = request.headers.get('CF-Connecting-IP') || (isLocalhost(url.hostname) ? 'localhost' : null);
+  if (!ip) {
+    console.error('dashboard: CF-Connecting-IP がないリクエスト。Cloudflare を経由しない構成ではログインできません');
+    return html(503, 'ログインできません', '<p>接続元を確認できませんでした。Cloudflare を経由して開いてください。</p>');
+  }
   // 試行を先に数える（正しいトークンでも数える）。区切りの 10 分を過ぎていたら 1 からやり直す
   const counted = await db
     .prepare(
@@ -114,6 +122,8 @@ async function login(request, env) {
   const id = b64url(crypto.getRandomValues(new Uint8Array(32)));
   await db.batch([
     db.prepare("DELETE FROM dashboard_sessions WHERE expires_at <= datetime('now')"),
+    // 区切りが終わった試行の記録を片付ける（ほかの IP の分も）
+    db.prepare(`DELETE FROM dashboard_login_attempts WHERE window_start <= datetime('now', '-${LOGIN_WINDOW_SECONDS} seconds')`),
     db.prepare(`INSERT INTO dashboard_sessions (id_hash, expires_at) VALUES (?1, datetime('now', '+${SESSION_SECONDS} seconds'))`).bind(await sha256(id)),
     db.prepare('DELETE FROM dashboard_login_attempts WHERE ip = ?1').bind(ip),
   ]);
