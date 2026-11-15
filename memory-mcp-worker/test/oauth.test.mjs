@@ -130,7 +130,7 @@ async function openConsent(clientId) {
   const html = await res.text();
   assert.equal(res.status, 200, html);
   const handle = html.match(/name="handle" value="([^"]+)"/)[1].replace(/&#(\d+);/g, (_, n) => String.fromCharCode(n));
-  return { jar, handle, html, verifier, state };
+  return { jar, handle, html, verifier, state, csp: res.headers.get('content-security-policy') };
 }
 
 async function submit(jar, handle, decision) {
@@ -214,6 +214,14 @@ try {
     assert.ok(!html.includes('<script>'));
     assert.ok(html.includes('127.0.0.1'));
     assert.ok(html.includes('この PC 上のアプリ'), 'ループバックへの送信は警告する');
+  });
+
+  await test('同意画面の CSP は、許可後のリダイレクト先（GitHub と接続元のアプリ）を通す', async () => {
+    const { csp } = await openConsent(clientId);
+    const formAction = csp.split(';').map((s) => s.trim()).find((s) => s.startsWith('form-action')).split(/\s+/).slice(1);
+    assert.ok(formAction.includes("'self'"));
+    assert.ok(formAction.includes(new URL(CLIENT_REDIRECT).origin), csp);
+    assert.ok(formAction.some((s) => s.startsWith('http://127.0.0.1:8789')), 'GitHub（テストではモック）');
   });
 
   await test('拒否するとクライアントへ access_denied で戻る', async () => {

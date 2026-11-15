@@ -36,7 +36,7 @@ export async function handleAuthRoutes(request, env, origin) {
   const { pathname } = new URL(request.url);
   const oauth = env.OAUTH_PROVIDER;
   try {
-    if (pathname === '/authorize' && request.method === 'GET') return await showConsent(request, oauth);
+    if (pathname === '/authorize' && request.method === 'GET') return await showConsent(request, env, oauth);
     if (pathname === '/authorize' && request.method === 'POST') return await submitConsent(request, env, oauth, origin);
     if (pathname === GITHUB_CALLBACK_PATH && request.method === 'GET') return await githubCallback(request, env, oauth, origin);
   } catch (error) {
@@ -59,7 +59,7 @@ export async function handleAuthRoutes(request, env, origin) {
 // 1. 同意画面
 // ---------------------------------------------------------------------------
 
-async function showConsent(request, oauth) {
+async function showConsent(request, env, oauth) {
   const authRequest = await oauth.parseAuthRequest(request);
   const details = await oauth.describeConsent(authRequest); // 先に呼ぶ（失敗しても KV に何も残らない）
   const consent = await oauth.beginConsent(authRequest);
@@ -82,7 +82,10 @@ ${loopback}
   <button name="decision" value="approve">許可</button>
   <button name="decision" value="deny" class="secondary">拒否</button>
 </form>`;
-  return page(200, `${name} に接続を許可しますか？`, body, consent.headers);
+  // 「許可」「拒否」のあとのリダイレクト（GitHub → このサーバー → 接続元のアプリ）を CSP の form-action で止めないよう、
+  // 送り先を許可しておく。ブラウザは form-action をフォーム送信後のリダイレクトの連鎖すべてに当てはめる
+  const formAction = [new URL(githubBase(env)).origin, cspSource(authRequest.redirectUri)].filter(Boolean);
+  return page(200, `${name} に接続を許可しますか？`, body, consent.headers, formAction);
 }
 
 // ---------------------------------------------------------------------------
@@ -230,12 +233,24 @@ function base64url(bytes) {
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
+/** リダイレクト先 URI を CSP のソース表現にする（http(s) はオリジン、独自スキームはスキームだけ）。使えない値なら null */
+function cspSource(uri) {
+  let u;
+  try {
+    u = new URL(uri);
+  } catch {
+    return null;
+  }
+  if (u.protocol === 'https:' || u.protocol === 'http:') return u.origin;
+  return /^[a-z][a-z0-9+.-]*:$/.test(u.protocol) ? u.protocol : null;
+}
+
 /** title と body は呼び出し側でエスケープ済みであること */
-function page(status, title, body, headers = new Headers()) {
+function page(status, title, body, headers = new Headers(), formAction = []) {
   const h = new Headers(headers);
   h.set('Content-Type', 'text/html; charset=utf-8');
   h.set('Cache-Control', 'no-store');
-  h.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://github.com; frame-ancestors 'none'");
+  h.set('Content-Security-Policy', `default-src 'none'; style-src 'unsafe-inline'; form-action ${["'self'", ...formAction].join(' ')}; frame-ancestors 'none'`);
   h.set('X-Frame-Options', 'DENY');
   const html = `<!doctype html>
 <html lang="ja">
