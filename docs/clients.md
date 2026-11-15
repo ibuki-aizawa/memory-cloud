@@ -17,6 +17,8 @@ README の手順 2・3 のスクリプトが、どのファイルに何を書く
 - 何度実行しても問題ありません。書き換えた設定ファイルは `<ファイル名>.bak` に元の内容が残ります
 - JSON の設定ファイルは書き直すため、ファイル内のコメントは消えます（`.bak` には残ります）
 - Claude Code 以外の設定ファイルにはトークンを書かず、環境変数 `MEMORY_TOKEN` を参照させます
+- 環境変数を自動で保存するのは Windows だけです。macOS / Linux では `MEMORY_URL` と `MEMORY_TOKEN` を `~/.zshrc`（bash なら `~/.bashrc`）に `export` で追加してください（README の手順 2）
+- macOS で Cursor や VS Code を Dock から起動すると、シェルの環境変数を読まないことがあります。ターミナルから `cursor .` / `code .` で起動してください
 - Cursor のユーザー共通ルールはファイルに置けないため、`client/templates/user-memory-rules.md` の内容を
   Cursor Settings > Rules の User Rules に貼り付けてください
 

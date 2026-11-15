@@ -61,26 +61,28 @@ AI:     （記憶に追記）「ヘッダーの前後の空白で認証が失敗
 
 必要なもの:
 - [Node.js](https://nodejs.org/) 20 以上
-- [PowerShell 7](https://learn.microsoft.com/ja-jp/powershell/scripting/install/installing-powershell)（Windows / macOS / Linux）
+- [PowerShell 7](https://learn.microsoft.com/ja-jp/powershell/scripting/install/installing-powershell)（導入スクリプトに使います。macOS は `brew install powershell`）
 - Claude Code、Codex CLI、Gemini CLI、Cursor、VS Code、Windsurf のどれか
+
+コマンドは PowerShell と bash / zsh の両方で書いています。どちらでも同じものは 1 つにまとめています。
 
 ### 1. サーバーを用意する
 
 **Cloudflare のアカウントを作る**: https://dash.cloudflare.com/sign-up でメールアドレスを登録します。
 ドメインの追加を勧められても不要です（スキップしてください）。
 
-**リポジトリを取得してログインする**:
+**リポジトリを取得してログインする**（PowerShell / bash / zsh 共通）:
 
-```powershell
+```sh
 git clone https://github.com/ibuki-aizawa/memory-cloud.git
 cd memory-cloud/memory-mcp-worker
 npm install
 npx wrangler login        # ブラウザが開くので「Allow」
 ```
 
-**データベースを作る**:
+**データベースを作る**（共通）:
 
-```powershell
+```sh
 npx wrangler d1 create memory-mcp
 npx wrangler kv namespace create OAUTH_KV
 ```
@@ -88,20 +90,22 @@ npx wrangler kv namespace create OAUTH_KV
 それぞれの出力に表示される ID を、`wrangler.jsonc` の `database_id` と `id` に書き換えます
 （リポジトリに入っている値は作者の環境のものです）。「設定ファイルに自動で追加するか」と聞かれたら **No** を選びます。
 
-```powershell
+```sh
 npm run db:init           # テーブルを作成
 ```
 
-**デプロイする**:
+**デプロイする**（共通）:
 
-```powershell
+```sh
 npm run deploy
 ```
 
 初回は URL の一部になる名前（サブドメイン）を決めるよう求められます。
 最後に表示される `https://memory-mcp.<サブドメイン>.workers.dev` が、記憶サーバーの URL です。
 
-**トークンを設定する**: トークンは、記憶サーバーに接続するためのパスワードです。
+**トークンを設定する**: トークンは、記憶サーバーに接続するためのパスワードです。ランダムな値を作ってサーバーに登録します。
+
+PowerShell:
 
 ```powershell
 $url = 'https://memory-mcp.<サブドメイン>.workers.dev'
@@ -110,17 +114,42 @@ $token | npx wrangler secret put MEMORY_TOKEN
 $token                    # 表示された値をパスワードマネージャーなどに保管
 ```
 
+bash / zsh:
+
+```sh
+url='https://memory-mcp.<サブドメイン>.workers.dev'
+token=$(openssl rand -hex 32)
+printf '%s' "$token" | npx wrangler secret put MEMORY_TOKEN
+echo "$token"             # 表示された値をパスワードマネージャーなどに保管
+```
+
 ### 2. PC の AI ツールをつなぐ
 
 リポジトリの直下（`memory-cloud/`）で実行します。この PC に入っている AI ツールを自動で探して設定します。
+
+PowerShell:
 
 ```powershell
 cd ..
 pwsh ./client/setup-client.ps1 -Url $url -Token $token
 ```
 
+bash / zsh:
+
+```sh
+cd ..
+pwsh ./client/setup-client.ps1 -Url "$url" -Token "$token"
+
+# macOS / Linux では環境変数が自動で保存されないので、シェルの設定ファイルに追加する（bash なら ~/.bashrc）
+cat >> ~/.zshrc <<EOF
+export MEMORY_URL='$url'
+export MEMORY_TOKEN='$token'
+EOF
+```
+
 終わったら、ターミナルとエディターを開き直してください。
 Claude Code なら `/mcp` コマンドで `memory-global` が connected になっていれば成功です。
+macOS で Cursor や VS Code が環境変数を読めない場合は、ターミナルから `cursor .` / `code .` で起動してください。
 
 スクリプトが書き込むファイルや、手で設定する方法は [docs/clients.md](docs/clients.md) にあります。
 
@@ -128,9 +157,9 @@ Claude Code なら `/mcp` コマンドで `memory-global` が connected にな�
 
 1. [`memory-kit/`](memory-kit/) の中身を、導入したいリポジトリにコピーします
    （必須は `AGENTS.md` と `scripts/`。あとは使うツールの分だけ。詳しくは [docs/clients.md](docs/clients.md)）
-2. 導入先のリポジトリで、プロジェクトの略称（英小文字・数字・ハイフン）を決めて実行します
+2. 導入先のリポジトリで、プロジェクトの略称（英小文字・数字・ハイフン）を決めて実行します（共通）
 
-   ```powershell
+   ```sh
    pwsh ./scripts/init-project.ps1 -Slug myapp
    ```
 

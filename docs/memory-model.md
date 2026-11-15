@@ -63,9 +63,9 @@ server-memory との違い:
 ## server-memory から移行する
 
 MCP 公式の記憶サーバー（server-memory）をローカルで使っていた場合は、その jsonl ファイルを取り込めます。
-先に README の手順 2（PC の AI ツールをつなぐ）を済ませてから、リポジトリの直下で実行します。
+先に README の手順 2（PC の AI ツールをつなぐ）を済ませてから、リポジトリの直下で実行します（PowerShell / bash / zsh 共通）。
 
-```powershell
+```sh
 pwsh ./client/import-jsonl.ps1 -Path <jsonl ファイル> -Scope global      # 共通の記憶へ
 pwsh ./client/import-jsonl.ps1 -Path <jsonl ファイル> -Scope myapp       # プロジェクト myapp の記憶へ
 ```

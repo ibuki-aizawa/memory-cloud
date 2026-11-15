@@ -1,13 +1,13 @@
 # 運用
 
 記憶の中身の確認、バックアップ、トークンの交換、困ったときの対処です。
-コマンドはどれも `memory-mcp-worker/` で実行します。
+コマンドはどれも `memory-mcp-worker/` で実行します。PowerShell / bash / zsh のどれでも同じように使えます。
 
 ## 記憶の中身を確認・修正する
 
 AI を通さずに、直接データベースを操作できます。
 
-```powershell
+```sh
 # プロジェクト myapp のエンティティ一覧
 npx wrangler d1 execute memory-mcp --remote --command "SELECT name, entity_type, updated_at FROM entities WHERE scope='p:myapp' ORDER BY updated_at DESC"
 
@@ -20,7 +20,7 @@ npx wrangler d1 execute memory-mcp --remote --command "UPDATE observations SET c
 
 ## バックアップ
 
-```powershell
+```sh
 npm run db:export         # backup.sql に書き出し（.gitignore 済み。git にはコミットしない）
 ```
 
@@ -30,7 +30,7 @@ README の「1. サーバーを用意する」の「トークンを設定する�
 
 ## ログを見る
 
-```powershell
+```sh
 npx wrangler tail
 ```
 
@@ -38,7 +38,7 @@ npx wrangler tail
 
 ## テスト
 
-```powershell
+```sh
 npm test                  # 記憶の読み書きのテスト（Node.js 22.5 以上）
 npm run test:oauth        # OAuth のテスト。ローカルでサーバーを起動するので 1 分ほどかかる（Cloudflare には接続しない）
 ```
@@ -47,7 +47,7 @@ npm run test:oauth        # OAuth のテスト。ローカルでサーバーを�
 
 | 症状 | 対処 |
 |---|---|
-| Claude Code の `/mcp` で memory-project が failed | ターミナルを開き直して環境変数を反映する。`$env:MEMORY_URL` で URL が表示されるか確認 |
+| Claude Code の `/mcp` で memory-project が failed | ターミナルを開き直して環境変数を反映する。URL が表示されるか確認（PowerShell は `$env:MEMORY_URL`、bash / zsh は `echo $MEMORY_URL`） |
 | Cursor / VS Code / Windsurf でつながらない | エディターを完全に終了してから起動し直す（起動中のエディターには新しい環境変数が反映されない） |
 | Codex でプロジェクトの memory-project が出ない | プロジェクトを trusted にする。`.codex/config.toml` の URL が `{{MEMORY_URL}}` のままなら `init-project.ps1` を再実行 |
 | 設定ファイルを壊してしまった | スクリプトが残した `<ファイル名>.bak` から戻す |
