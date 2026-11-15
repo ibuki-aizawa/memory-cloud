@@ -35,7 +35,7 @@ AI には「いつ・何を・どう書くか」のルールを渡します。�
 主な決まりごと:
 - 名前は `種別:スコープ/名前`（例: `Decision:myapp/use-sqlite`）
 - 種別は Project, Component, Decision, Convention, Lesson, Agent, Tech, Person のどれか
-- observation は `[YYYY-MM-DD 書き手] 1文`
+- observation は `[YYYY-MM-DD 書き手] 1文`。書き手は `whoami` で確認した名前（サーバーも書き手を自動で記録する）
 - 保存前に検索して重複を避け、既存のエンティティへの追記を優先する
 - 作業ログは保存しない。今後も使う事実・決定・教訓だけを保存する
 - 決定を覆すときは消さずに、新しい Decision を作って `supersedes` でつなぐ
@@ -47,11 +47,12 @@ AI には「いつ・何を・どう書くか」のルールを渡します。�
 | ツール | 用途 |
 |---|---|
 | `search_nodes` | キーワードで検索する。上位 10 件と、各 observation の抜粋（3 件まで）を返す |
-| `open_nodes` | 名前を指定して、observation の全文と、つながっているリレーションを読む |
+| `open_nodes` | 名前を指定して、observation の全文と、つながっているリレーションを読む。`withAuthors: true` で書き手と日時も返す |
 | `create_entities` | エンティティを作る（既にある名前はスキップ） |
 | `add_observations` | 既存のエンティティに observation を追加する（同じ内容は重複しない） |
 | `create_relations` | リレーションを作る |
 | `delete_entities` / `delete_observations` / `delete_relations` | 削除する |
+| `whoami` | 自分（接続しているエージェント）の名前を確認する（[エージェントの識別](agents.md)） |
 
 server-memory との違い:
 - 記憶を全部読み込む `read_graph` はありません（記憶が増えると AI の利用量が膨らむため）

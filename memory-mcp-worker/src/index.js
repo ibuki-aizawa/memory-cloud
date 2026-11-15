@@ -1,7 +1,7 @@
 /**
  * memory-mcp のエントリーポイント。リクエストを認証方式ごとに振り分けます（MCP の処理本体は mcp.js）。
  *
- *   1. Authorization: Bearer <MEMORY_TOKEN> … これまでどおり。OAuth も KV も通らない
+ *   1. Authorization: Bearer <MEMORY_TOKEN> または mca_...（エージェントのトークン） … OAuth も KV も通らない
  *   2. それ以外 … OAuth 2.1（@cloudflare/workers-oauth-provider）。claude.ai などの Web 版クライアント向け
  *      /mcp 以下を 1 つのリソースとして保護するので、1 回の接続で /mcp/global と /mcp/p/<slug> の両方を使えます。
  *
@@ -15,8 +15,9 @@
  */
 
 import { OAuthProvider } from '@cloudflare/workers-oauth-provider';
-import tokenOnlyWorker, { handleMcp, isAuthorized, notFound, parseScope, rootResponse } from './mcp.js';
+import tokenOnlyWorker, { handleMcp, notFound, parseScope, resolveTokenIdentity, rootResponse } from './mcp.js';
 import { handleAuthRoutes, isAllowedUser, oauthConfigured } from './auth.js';
+import { userIdentity } from './agents.js';
 
 const MCP_ROUTE = '/mcp';
 
@@ -25,13 +26,19 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/' || url.pathname === '') return rootResponse();
 
-    // 1. 固定トークン
-    if (isUnderMcpRoute(url.pathname) && isAuthorized(request, env)) {
-      const scope = parseScope(url.pathname);
-      return scope ? handleMcp(request, env, scope) : notFound();
+    // 管理用（エージェントの発行・失効）。管理者トークンだけ
+    if (url.pathname.startsWith('/admin/')) return tokenOnlyWorker.fetch(request, env);
+
+    // 1. 管理者トークン・エージェントのトークン
+    if (isUnderMcpRoute(url.pathname)) {
+      const identity = await resolveTokenIdentity(request, env);
+      if (identity) {
+        const scope = parseScope(url.pathname);
+        return scope ? handleMcp(request, env, scope, identity) : notFound();
+      }
     }
 
-    // OAuth を設定していなければ、従来どおり固定トークン認証だけで応答する
+    // OAuth を設定していなければ、トークン認証だけで応答する
     if (!oauthConfigured(env)) return tokenOnlyWorker.fetch(request, env);
 
     // 2. OAuth
@@ -52,7 +59,7 @@ const oauthMcpHandler = {
     if (!isAllowedUser(env, ctx.props && ctx.props.login)) {
       return Response.json({ error: 'forbidden' }, { status: 403 });
     }
-    return handleMcp(request, env, scope);
+    return handleMcp(request, env, scope, userIdentity(ctx.props.login));
   },
 };
 

@@ -6,17 +6,19 @@
  *   POST /mcp/global          … プロジェクト横断の共通ナレッジ
  *   POST /mcp/p/<slug>        … プロジェクトごとのナレッジ
  *
- * 認証（index.js が振り分けます）
- *   - Authorization: Bearer <MEMORY_TOKEN>（wrangler secret で設定。Claude Code などのローカルクライアント向け）
- *   - OAuth 2.1 + GitHub サインイン（claude.ai などの Web 版クライアント向け。auth.js）
+ * 認証（index.js が振り分けます。誰からのリクエストかは書き手として記録します）
+ *   - Authorization: Bearer <MEMORY_TOKEN>（管理者。wrangler secret で設定）
+ *   - Authorization: Bearer mca_...（エージェントごとのトークン。agents.js、/admin/agents で発行）
+ *   - OAuth 2.1 + GitHub サインイン（Web 版のクライアント向け。auth.js）
  *
  * server-memory との違い
  *   - read_graph はありません（全件読み込みによるトークン浪費を防ぐため）
  *   - search_nodes は上位 10 件・各 observation は最大 3 件のプレビューを返します
  *   - open_nodes は指定ノードに接続するリレーションも返します（近傍の把握用）
  */
+import { adminIdentity, bearerToken, handleAdmin, resolveAgent } from './agents.js';
 
-const SERVER_INFO = { name: 'memory-mcp', version: '1.0.0' };
+const SERVER_INFO = { name: 'memory-mcp', version: '1.1.0' };
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 
 const MAX_ITEMS = 20;          // 1 回のツール呼び出しで扱う最大件数
@@ -142,12 +144,20 @@ const TOOLS = [
   },
   {
     name: 'open_nodes',
-    description: `名前を指定してエンティティを取得します（最大 ${MAX_ITEMS} 件）。全 observation と、接続するリレーションを返します。`,
+    description: `名前を指定してエンティティを取得します（最大 ${MAX_ITEMS} 件）。全 observation と、接続するリレーションを返します。誰がいつ書いたかが必要なときだけ withAuthors: true を指定してください。`,
     inputSchema: {
       type: 'object',
-      properties: { names: { type: 'array', items: { type: 'string' }, maxItems: MAX_ITEMS } },
+      properties: {
+        names: { type: 'array', items: { type: 'string' }, maxItems: MAX_ITEMS },
+        withAuthors: { type: 'boolean', description: 'true なら observation ごとの書き手（author）と日時（createdAt）、エンティティの作成者（createdBy）も返す' },
+      },
       required: ['names'],
     },
+  },
+  {
+    name: 'whoami',
+    description: 'このサーバーが認識している自分（接続しているエージェント）の名前と種類を返します。observation の書き手にはこの名前を使ってください。',
+    inputSchema: { type: 'object', properties: {} },
   },
 ];
 
@@ -162,12 +172,24 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/' || url.pathname === '') return rootResponse();
 
+    if (url.pathname.startsWith('/admin/')) {
+      if (!isAuthorized(request, env)) return jsonResponse({ error: 'unauthorized' }, 401);
+      return handleAdmin(request, env);
+    }
+
     const scope = parseScope(url.pathname);
     if (!scope) return notFound();
-    if (!isAuthorized(request, env)) return jsonResponse({ error: 'unauthorized' }, 401);
-    return handleMcp(request, env, scope);
+    const identity = await resolveTokenIdentity(request, env);
+    if (!identity) return jsonResponse({ error: 'unauthorized' }, 401);
+    return handleMcp(request, env, scope, identity);
   },
 };
+
+/** 管理者トークンかエージェントのトークンなら identity を返す。どちらでもなければ null */
+export async function resolveTokenIdentity(request, env) {
+  if (isAuthorized(request, env)) return adminIdentity();
+  return resolveAgent(env.DB, bearerToken(request));
+}
 
 export function rootResponse() {
   return new Response('memory-mcp is running\n', { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
@@ -177,8 +199,11 @@ export function notFound() {
   return jsonResponse({ error: 'not found' }, 404);
 }
 
-/** 認証済みのリクエストを、指定したスコープの MCP（JSON-RPC）として処理します。 */
-export async function handleMcp(request, env, scope) {
+/**
+ * 認証済みのリクエストを、指定したスコープの MCP（JSON-RPC）として処理します。
+ * identity は { kind: 'admin' | 'agent' | 'user', name }。書き込みの書き手として記録します。
+ */
+export async function handleMcp(request, env, scope, identity) {
   if (request.method !== 'POST') {
     // SSE ストリームは提供しない（ステートレス運用）
     return new Response(null, { status: 405, headers: { Allow: 'POST' } });
@@ -191,7 +216,7 @@ export async function handleMcp(request, env, scope) {
     return jsonResponse(rpcError(null, -32700, 'Parse error'), 400);
   }
 
-  const ctx = { db: env.DB, scope };
+  const ctx = { db: env.DB, scope, identity, author: identity.name };
 
   if (Array.isArray(body)) {
     const responses = (await Promise.all(body.map((m) => handleMessage(m, ctx)))).filter(Boolean);
@@ -208,7 +233,7 @@ export function parseScope(pathname) {
   return m ? `p:${m[1]}` : null;
 }
 
-/** 固定トークン（MEMORY_TOKEN）での認証。Authorization ヘッダーが一致すれば true */
+/** 管理者トークン（MEMORY_TOKEN）での認証。Authorization ヘッダーが一致すれば true */
 export function isAuthorized(request, env) {
   const expected = env.MEMORY_TOKEN;
   if (!expected) return false;
@@ -286,7 +311,16 @@ async function callTool(name, args, ctx) {
 // ---------------------------------------------------------------------------
 
 const HANDLERS = {
-  async create_entities(args, { db, scope }) {
+  async whoami(_args, { identity, scope }) {
+    const hints = {
+      admin: '管理者トークン（MEMORY_TOKEN）で接続しています。エージェントごとにトークンを分けると、書き手を区別できます。',
+      agent: 'エージェント専用のトークンで接続しています。',
+      user: 'OAuth でログインして接続しています。',
+    };
+    return { name: identity.name, kind: identity.kind, scope, hint: hints[identity.kind] };
+  },
+
+  async create_entities(args, { db, scope, author }) {
     const entities = list(args.entities, 'entities').map((e, i) => ({
       name: str(e && e.name, `entities[${i}].name`, MAX_NAME_LENGTH),
       entityType: str(e && e.entityType, `entities[${i}].entityType`, MAX_NAME_LENGTH),
@@ -307,17 +341,17 @@ const HANDLERS = {
       const payload = JSON.stringify(fresh);
       await db.batch([
         db.prepare(
-          `INSERT OR IGNORE INTO entities (scope, name, entity_type)
-           SELECT ?1, json_extract(value, '$.name'), json_extract(value, '$.entityType')
+          `INSERT OR IGNORE INTO entities (scope, name, entity_type, created_by)
+           SELECT ?1, json_extract(value, '$.name'), json_extract(value, '$.entityType'), ?3
            FROM json_each(?2)`
-        ).bind(scope, payload),
+        ).bind(scope, payload, author),
         db.prepare(
-          `INSERT OR IGNORE INTO observations (entity_id, content)
-           SELECT e.id, o.value
+          `INSERT OR IGNORE INTO observations (entity_id, content, author)
+           SELECT e.id, o.value, ?3
            FROM json_each(?2) AS j
            JOIN entities AS e ON e.scope = ?1 AND e.name = json_extract(j.value, '$.name')
            JOIN json_each(j.value, '$.observations') AS o`
-        ).bind(scope, payload),
+        ).bind(scope, payload, author),
       ]);
     }
 
@@ -329,25 +363,25 @@ const HANDLERS = {
     return result;
   },
 
-  async create_relations(args, { db, scope }) {
+  async create_relations(args, { db, scope, author }) {
     const relations = list(args.relations, 'relations').map((r, i) => relation(r, `relations[${i}]`));
     const missing = await missingNames(db, scope, unique(relations.flatMap((r) => [r.from, r.to])));
     const res = await db
       .prepare(
-        `INSERT OR IGNORE INTO relations (from_id, to_id, relation_type)
-         SELECT f.id, t.id, json_extract(j.value, '$.relationType')
+        `INSERT OR IGNORE INTO relations (from_id, to_id, relation_type, created_by)
+         SELECT f.id, t.id, json_extract(j.value, '$.relationType'), ?3
          FROM json_each(?2) AS j
          JOIN entities AS f ON f.scope = ?1 AND f.name = json_extract(j.value, '$.from')
          JOIN entities AS t ON t.scope = ?1 AND t.name = json_extract(j.value, '$.to')`
       )
-      .bind(scope, JSON.stringify(relations))
+      .bind(scope, JSON.stringify(relations), author)
       .run();
     const result = { created: changes(res) };
     if (missing.length) result.missing_entities = missing;
     return result;
   },
 
-  async add_observations(args, { db, scope }) {
+  async add_observations(args, { db, scope, author }) {
     const items = list(args.observations, 'observations').map((o, i) => ({
       entityName: str(o && o.entityName, `observations[${i}].entityName`, MAX_NAME_LENGTH),
       contents: strings(o && o.contents, `observations[${i}].contents`),
@@ -356,12 +390,12 @@ const HANDLERS = {
     const payload = JSON.stringify(items);
     const [inserted] = await db.batch([
       db.prepare(
-        `INSERT OR IGNORE INTO observations (entity_id, content)
-         SELECT e.id, c.value
+        `INSERT OR IGNORE INTO observations (entity_id, content, author)
+         SELECT e.id, c.value, ?3
          FROM json_each(?2) AS j
          JOIN entities AS e ON e.scope = ?1 AND e.name = json_extract(j.value, '$.entityName')
          JOIN json_each(j.value, '$.contents') AS c`
-      ).bind(scope, payload),
+      ).bind(scope, payload, author),
       db.prepare(
         `UPDATE entities SET updated_at = datetime('now')
          WHERE scope = ?1 AND name IN (SELECT json_extract(value, '$.entityName') FROM json_each(?2))`
@@ -458,7 +492,7 @@ const HANDLERS = {
     const lowered = terms.map((t) => t.toLowerCase());
 
     const results = top.map((h) => {
-      const all = obsByEntity.get(h.id) || [];
+      const all = (obsByEntity.get(h.id) || []).map((o) => o.content);
       const matching = all.filter((c) => lowered.some((t) => c.toLowerCase().includes(t)));
       const rest = all.filter((c) => !matching.includes(c));
       const item = {
@@ -478,9 +512,10 @@ const HANDLERS = {
 
   async open_nodes(args, { db, scope }) {
     const names = unique(list(args.names, 'names').map((n, i) => str(n, `names[${i}]`, MAX_NAME_LENGTH)));
+    const withAuthors = args.withAuthors === true;
     const { results: rows } = await db
       .prepare(
-        `SELECT id, name, entity_type FROM entities
+        `SELECT id, name, entity_type, created_by FROM entities
          WHERE scope = ?1 AND name IN (SELECT value FROM json_each(?2))`
       )
       .bind(scope, JSON.stringify(names))
@@ -509,11 +544,14 @@ const HANDLERS = {
 
     const found = new Set(rows.map((r) => r.name));
     const out = {
-      entities: rows.map((r) => ({
-        name: r.name,
-        entityType: r.entity_type,
-        observations: obsByEntity.get(r.id) || [],
-      })),
+      entities: rows.map((r) => {
+        const obs = obsByEntity.get(r.id) || [];
+        if (!withAuthors) {
+          // 既定は server-memory と同じ形（文字列の配列）。AI の利用量を抑えるため
+          return { name: r.name, entityType: r.entity_type, observations: obs.map((o) => o.content) };
+        }
+        return { name: r.name, entityType: r.entity_type, createdBy: r.created_by, observations: obs };
+      }),
       relations,
     };
     const notFound = names.filter((n) => !found.has(n));
@@ -546,7 +584,7 @@ async function observationsFor(db, ids) {
   if (!ids.length) return map;
   const { results } = await db
     .prepare(
-      `SELECT entity_id, content FROM observations
+      `SELECT entity_id, content, author, created_at FROM observations
        WHERE entity_id IN (SELECT value FROM json_each(?1))
        ORDER BY id`
     )
@@ -554,7 +592,7 @@ async function observationsFor(db, ids) {
     .all();
   for (const r of results) {
     if (!map.has(r.entity_id)) map.set(r.entity_id, []);
-    map.get(r.entity_id).push(r.content);
+    map.get(r.entity_id).push({ content: r.content, author: r.author, createdAt: r.created_at });
   }
   return map;
 }

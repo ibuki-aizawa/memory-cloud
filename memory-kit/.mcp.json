@@ -4,7 +4,7 @@
       "type": "http",
       "url": "${MEMORY_URL}/mcp/p/{{PROJECT}}",
       "headers": {
-        "Authorization": "Bearer ${MEMORY_TOKEN}"
+        "Authorization": "Bearer ${MEMORY_TOKEN_CLAUDE}"
       }
     }
   }

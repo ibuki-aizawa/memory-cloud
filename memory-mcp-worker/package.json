@@ -4,10 +4,11 @@
   "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",
-    "db:init": "wrangler d1 execute memory-mcp --remote --file=schema.sql",
+    "db:init": "wrangler d1 execute memory-mcp --remote --file=schema.sql && wrangler d1 migrations apply memory-mcp --remote",
     "db:export": "wrangler d1 export memory-mcp --remote --output=backup.sql",
     "test": "node --experimental-sqlite --no-warnings test/test.mjs",
-    "test:oauth": "node test/oauth.test.mjs"
+    "test:oauth": "node test/oauth.test.mjs",
+    "db:migrate": "wrangler d1 migrations apply memory-mcp --remote"
   },
   "devDependencies": {
     "wrangler": "^4.162.0"

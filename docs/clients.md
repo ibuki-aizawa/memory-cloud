@@ -16,8 +16,9 @@ README の手順 2・3 のスクリプトが、どのファイルに何を書く
 `setup-client.ps1` について:
 - 何度実行しても問題ありません。書き換えた設定ファイルは `<ファイル名>.bak` に元の内容が残ります
 - JSON の設定ファイルは書き直すため、ファイル内のコメントは消えます（`.bak` には残ります）
-- Claude Code 以外の設定ファイルにはトークンを書かず、環境変数 `MEMORY_TOKEN` を参照させます
-- 環境変数を自動で保存するのは Windows だけです。macOS / Linux では `MEMORY_URL` と `MEMORY_TOKEN` を `~/.zshrc`（bash なら `~/.bashrc`）に `export` で追加してください（README の手順 2）
+- AI ツールごとに専用のトークンを発行し、`MEMORY_TOKEN_CLAUDE`、`MEMORY_TOKEN_CODEX` のような環境変数に保存します（[エージェントの識別](agents.md)）
+- Claude Code 以外の設定ファイルにはトークンを書かず、その環境変数を参照させます
+- 環境変数は、Windows ではユーザー環境変数に、macOS / Linux では `~/.memory-cloud.env` に保存します。macOS / Linux では `~/.zshrc`（bash なら `~/.bashrc`）にこのファイルを読み込む 1 行を追加してください（README の手順 2）
 - macOS で Cursor や VS Code を Dock から起動すると、シェルの環境変数を読まないことがあります。ターミナルから `cursor .` / `code .` で起動してください
 - Cursor のユーザー共通ルールはファイルに置けないため、`client/templates/user-memory-rules.md` の内容を
   Cursor Settings > Rules の User Rules に貼り付けてください
@@ -41,14 +42,15 @@ MCP の「Streamable HTTP」方式に対応したツールなら使えます。
 
 どれも URL は `<サーバーの URL>/mcp/global`（共通）か `<サーバーの URL>/mcp/p/<略称>`（プロジェクト）、
 ヘッダーは `Authorization: Bearer <トークン>` です。
-例の `${MEMORY_URL}` / `${MEMORY_TOKEN}` は、README の手順 2 のスクリプトが保存した環境変数を参照する書き方です。
+トークンは、そのツール用に発行したもの（`pwsh ./client/agent-token.ps1 new <名前>`）を使います。
+例の `${MEMORY_URL}` / `${MEMORY_TOKEN_CODEX}` などは、環境変数を参照する書き方です。
 
 **Codex CLI**（`~/.codex/config.toml`）
 
 ```toml
 [mcp_servers.memory-global]
 url = "https://memory-mcp.<サブドメイン>.workers.dev/mcp/global"
-bearer_token_env_var = "MEMORY_TOKEN"
+bearer_token_env_var = "MEMORY_TOKEN_CODEX"
 ```
 
 **Gemini CLI**（`~/.gemini/settings.json`）
@@ -58,20 +60,20 @@ bearer_token_env_var = "MEMORY_TOKEN"
   "mcpServers": {
     "memory-global": {
       "httpUrl": "${MEMORY_URL}/mcp/global",
-      "headers": { "Authorization": "Bearer ${MEMORY_TOKEN}" }
+      "headers": { "Authorization": "Bearer ${MEMORY_TOKEN_GEMINI}" }
     }
   }
 }
 ```
 
-**Cursor**（`~/.cursor/mcp.json`）／ **Windsurf**（`~/.codeium/windsurf/mcp_config.json`、`url` を `serverUrl` にする）
+**Cursor**（`~/.cursor/mcp.json`）／ **Windsurf**（`~/.codeium/windsurf/mcp_config.json`、`url` を `serverUrl` に、変数を `MEMORY_TOKEN_WINDSURF` にする）
 
 ```json
 {
   "mcpServers": {
     "memory-global": {
       "url": "${env:MEMORY_URL}/mcp/global",
-      "headers": { "Authorization": "Bearer ${env:MEMORY_TOKEN}" }
+      "headers": { "Authorization": "Bearer ${env:MEMORY_TOKEN_CURSOR}" }
     }
   }
 }
@@ -85,7 +87,7 @@ bearer_token_env_var = "MEMORY_TOKEN"
     "memory-global": {
       "type": "http",
       "url": "${env:MEMORY_URL}/mcp/global",
-      "headers": { "Authorization": "Bearer ${env:MEMORY_TOKEN}" }
+      "headers": { "Authorization": "Bearer ${env:MEMORY_TOKEN_VSCODE}" }
     }
   }
 }

@@ -6,17 +6,22 @@
 
 .DESCRIPTION
   1. 接続テスト（initialize）
-  2. ユーザー環境変数 MEMORY_URL / MEMORY_TOKEN を保存（各クライアントの設定とプロジェクトの設定が参照）
-  3. 各クライアントに memory-global（リモート）をユーザー設定として登録
-  4. 共通ナレッジの初期データを投入（既にあればスキップ）
-  5. 各クライアントのユーザー共通ルール（~/.claude/CLAUDE.md など）に共通メモリのルールを追記（追記済みならスキップ）
+  2. クライアントごとにエージェント用のトークンを発行（名前は <クライアント>-<PC 名>。書き手として記録される）
+  3. 環境変数 MEMORY_URL / MEMORY_TOKEN（管理者用）/ MEMORY_TOKEN_<クライアント> を保存
+     （Windows はユーザー環境変数、それ以外は ~/.memory-cloud.env。各クライアントの設定が参照する）
+  4. 各クライアントに memory-global（リモート）をユーザー設定として登録
+  5. 共通ナレッジの初期データを投入（既にあればスキップ）
+  6. 各クライアントのユーザー共通ルール（~/.claude/CLAUDE.md など）に共通メモリのルールを追記（追記済みならスキップ）
   設定ファイルを書き換えるときは、元のファイルを <ファイル名>.bak に残します。
 
 .PARAMETER Url
   Worker の URL（例: https://memory-mcp.your-name.workers.dev）
 
 .PARAMETER Token
-  MEMORY_TOKEN。省略時は環境変数、なければ入力を求めます。
+  管理者トークン（MEMORY_TOKEN）。省略時は環境変数、なければ入力を求めます。
+
+.PARAMETER SharedToken
+  エージェントごとのトークンを発行せず、すべてのクライアントで管理者トークンを使います（書き手は区別されません）。
 
 .PARAMETER Clients
   設定するクライアント（claude, codex, gemini, cursor, vscode, windsurf）。
@@ -32,7 +37,8 @@ param(
     [Parameter(Mandatory)][string]$Url,
     [string]$Token,
     [ValidateSet('claude', 'codex', 'gemini', 'cursor', 'vscode', 'windsurf')]
-    [string[]]$Clients
+    [string[]]$Clients,
+    [switch]$SharedToken
 )
 
 $ErrorActionPreference = 'Stop'
@@ -87,29 +93,60 @@ $init = Invoke-MemoryRpc -Endpoint $globalEndpoint -Method 'initialize' -Params 
 }
 Write-Host "接続OK: $($init.serverInfo.name) $($init.serverInfo.version)"
 
-# 2. 環境変数
+# 2. クライアントごとのトークン（エージェントの識別）
+$pcName = (([Environment]::MachineName).ToLower() -replace '[^a-z0-9-]', '-').Trim('-')
+if (-not $pcName) { $pcName = 'pc' }
+$tokenVars = [ordered]@{}   # 環境変数名 -> 値
+$tokenVars['MEMORY_TOKEN'] = $Token
+$agentTokens = @{}          # クライアント -> トークン
+foreach ($client in $Clients) {
+    $agentName = "$client-$pcName"
+    $agentTokens[$client] = $Token
+    if (-not $SharedToken) {
+        try {
+            $issued = Invoke-RestMethod -Method Post -Uri "$Url/admin/agents" `
+                -Headers @{ Authorization = "Bearer $Token" } -ContentType 'application/json' `
+                -Body (@{ name = $agentName } | ConvertTo-Json -Compress)
+            $agentTokens[$client] = $issued.token
+            Write-Host "  [$client] エージェント $agentName のトークンを発行しました"
+        }
+        catch {
+            Write-Warning "[$client] エージェントのトークンを発行できませんでした（サーバーが古い可能性があります）。管理者トークンを使います: $($_.Exception.Message)"
+        }
+    }
+    $tokenVars["MEMORY_TOKEN_$($client.ToUpper())"] = $agentTokens[$client]
+}
+
+# 3. 環境変数
+$env:MEMORY_URL = $Url
+foreach ($k in $tokenVars.Keys) { Set-Item "env:$k" $tokenVars[$k] }
 if ($IsWindows) {
     [Environment]::SetEnvironmentVariable('MEMORY_URL', $Url, 'User')
-    [Environment]::SetEnvironmentVariable('MEMORY_TOKEN', $Token, 'User')
-    Write-Host 'ユーザー環境変数 MEMORY_URL / MEMORY_TOKEN を保存しました'
+    foreach ($k in $tokenVars.Keys) { [Environment]::SetEnvironmentVariable($k, $tokenVars[$k], 'User') }
+    Write-Host "ユーザー環境変数を保存しました: MEMORY_URL, $($tokenVars.Keys -join ', ')"
 }
 else {
-    Write-Warning "Windows 以外では環境変数を自動保存しません。シェルの設定ファイルに MEMORY_URL と MEMORY_TOKEN を追加してください。"
+    $envFile = Join-Path $HOME '.memory-cloud.env'
+    $lines = @('# memory-cloud（setup-client.ps1 が作成）', "export MEMORY_URL='$Url'")
+    foreach ($k in $tokenVars.Keys) { $lines += "export $k='$($tokenVars[$k])'" }
+    $lines | Set-Content $envFile -Encoding utf8
+    chmod 600 $envFile
+    Write-Host "環境変数を $envFile に保存しました。シェルの設定ファイル（~/.zshrc や ~/.bashrc）に次の 1 行を追加してください:"
+    Write-Host '  [ -f ~/.memory-cloud.env ] && . ~/.memory-cloud.env'
 }
-$env:MEMORY_URL = $Url
-$env:MEMORY_TOKEN = $Token
 
-# 3. 各クライアントへの memory-global の登録
-#    Claude Code 以外はトークンを書かず、環境変数 MEMORY_TOKEN を参照させる
+# 4. 各クライアントへの memory-global の登録
+#    Claude Code 以外はトークンを書かず、環境変数 MEMORY_TOKEN_<クライアント> を参照させる
 $skipped = @()
 foreach ($client in $Clients) {
+    $var = "MEMORY_TOKEN_$($client.ToUpper())"
     try {
         switch ($client) {
             'claude' {
                 foreach ($name in 'memory', 'memory-global') {
                     claude mcp remove $name -s user 2>$null | Out-Null
                 }
-                claude mcp add --transport http -s user memory-global $globalEndpoint --header "Authorization: Bearer $Token"
+                claude mcp add --transport http -s user memory-global $globalEndpoint --header "Authorization: Bearer $($agentTokens[$client])"
                 if ($LASTEXITCODE -ne 0) { throw "claude mcp add が失敗しました（終了コード $LASTEXITCODE）" }
                 $where = '~/.claude.json'
             }
@@ -117,21 +154,21 @@ foreach ($client in $Clients) {
                 $where = Join-Path $HOME '.codex/config.toml'
                 Set-TomlTable -Path $where -Table 'mcp_servers.memory-global' -Lines @(
                     "url = ""$globalEndpoint"""
-                    'bearer_token_env_var = "MEMORY_TOKEN"'
+                    "bearer_token_env_var = ""$var"""
                 )
             }
             'gemini' {
                 $where = Join-Path $HOME '.gemini/settings.json'
                 Set-JsonMcpServer -Path $where -ContainerKey 'mcpServers' -Name 'memory-global' -Server ([ordered]@{
                         httpUrl = $globalEndpoint
-                        headers = [ordered]@{ Authorization = 'Bearer ${MEMORY_TOKEN}' }
+                        headers = [ordered]@{ Authorization = 'Bearer ${' + $var + '}' }
                     })
             }
             'cursor' {
                 $where = Join-Path $HOME '.cursor/mcp.json'
                 Set-JsonMcpServer -Path $where -ContainerKey 'mcpServers' -Name 'memory-global' -Server ([ordered]@{
                         url     = $globalEndpoint
-                        headers = [ordered]@{ Authorization = 'Bearer ${env:MEMORY_TOKEN}' }
+                        headers = [ordered]@{ Authorization = 'Bearer ${env:' + $var + '}' }
                     })
             }
             'vscode' {
@@ -139,14 +176,14 @@ foreach ($client in $Clients) {
                 Set-JsonMcpServer -Path $where -ContainerKey 'servers' -Name 'memory-global' -Server ([ordered]@{
                         type    = 'http'
                         url     = $globalEndpoint
-                        headers = [ordered]@{ Authorization = 'Bearer ${env:MEMORY_TOKEN}' }
+                        headers = [ordered]@{ Authorization = 'Bearer ${env:' + $var + '}' }
                     })
             }
             'windsurf' {
                 $where = Join-Path $HOME '.codeium/windsurf/mcp_config.json'
                 Set-JsonMcpServer -Path $where -ContainerKey 'mcpServers' -Name 'memory-global' -Server ([ordered]@{
                         serverUrl = $globalEndpoint
-                        headers   = [ordered]@{ Authorization = 'Bearer ${env:MEMORY_TOKEN}' }
+                        headers   = [ordered]@{ Authorization = 'Bearer ${env:' + $var + '}' }
                     })
             }
         }
@@ -158,7 +195,7 @@ foreach ($client in $Clients) {
     }
 }
 
-# 4. 共通ナレッジの初期データ（既存はスキップされる）
+# 5. 共通ナレッジの初期データ（既存はスキップされる）
 $today = Get-Date -Format 'yyyy-MM-dd'
 $seed = Invoke-MemoryTool -Endpoint $globalEndpoint -Name 'create_entities' -Arguments @{
     entities = @(
@@ -196,7 +233,7 @@ else {
     Write-Host '共通ナレッジの初期データは作成済みです'
 }
 
-# 5. ユーザー共通ルールへの追記
+# 6. ユーザー共通ルールへの追記
 $rulesTemplate = Join-Path $PSScriptRoot 'templates/user-memory-rules.md'
 $rules = Get-Content $rulesTemplate -Raw
 $rulesTargets = @{

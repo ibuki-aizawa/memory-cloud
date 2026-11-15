@@ -11,7 +11,8 @@
 - 命名: 種別:スコープ/名前（例 Decision:{{PROJECT}}/use-sqlite）。スコープは {{PROJECT}} か global
 - 種別は Project, Component, Decision, Convention, Lesson, Agent, Tech, Person のみ
 - 関係は part_of, applies_to, supersedes, uses, about, responsible_for のみ
-- observation は "[YYYY-MM-DD 書き手] 1文"。書き手は owner やエージェント名（例 claude, codex, reviewer）
+- observation は "[YYYY-MM-DD 書き手] 1文"。書き手は whoami で確認した自分の名前（サーバーも書き手を自動で記録する）
+- 誰がいつ書いたかを確かめたいときは open_nodes に withAuthors: true を付ける
 - 保存前に search_nodes で重複確認。新規作成より既存への add_observations を優先
 - 保存するのは今後も再利用する事実・決定・教訓だけ。作業ログは保存しない
 - 決定を覆すときは削除せず、新しい Decision を作り supersedes で結ぶ

@@ -1,7 +1,7 @@
 // ローカルテスト: node:sqlite で D1 を模擬して Worker の動作を確認します。
 // 実行: npm test   （Node.js 22.5 以上）
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import worker from '../src/mcp.js';
 
@@ -11,6 +11,7 @@ class Stmt {
   bind(...params) { return new Stmt(this.db, this.sql, params); }
   async all() { return this._all(); }
   async run() { return this._run(); }
+  async first() { return this.db.prepare(this.sql).get(...this.params) ?? null; }
   _all() { return { results: this.db.prepare(this.sql).all(...this.params), meta: {} }; }
   _run() { const r = this.db.prepare(this.sql).run(...this.params); return { results: [], meta: { changes: Number(r.changes) } }; }
   _exec() { return /^\s*select/i.test(this.sql) ? this._all() : this._run(); }
@@ -20,6 +21,11 @@ class D1Shim {
     this.db = new DatabaseSync(':memory:');
     this.db.exec('PRAGMA foreign_keys = ON;');
     this.db.exec(readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
+    // 本番と同じく、schema.sql のあとにマイグレーションを順に適用する
+    const dir = new URL('../migrations/', import.meta.url);
+    for (const f of readdirSync(dir).filter((n) => n.endsWith('.sql')).sort()) {
+      this.db.exec(readFileSync(new URL(f, dir), 'utf8'));
+    }
   }
   prepare(sql) { return new Stmt(this.db, sql); }
   async batch(stmts) {
@@ -152,6 +158,84 @@ await test('入力エラーは isError で返す', async () => {
   assert.ok(many.isError);
   const unknown = await call(P, 'read_graph', {});
   assert.ok(unknown.isError);
+});
+
+// --- エージェントの識別 ------------------------------------------------------
+
+async function admin(method, path, body, token = 'test-token') {
+  const headers = { Authorization: `Bearer ${token}` };
+  if (body) headers['Content-Type'] = 'application/json';
+  const res = await worker.fetch(new Request(`https://example.com${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined }), env);
+  return { status: res.status, body: await res.json() };
+}
+async function callAs(token, path, name, args) {
+  const { status, body } = await post(path, { jsonrpc: '2.0', id: nextId++, method: 'tools/call', params: { name, arguments: args } }, token);
+  assert.equal(status, 200);
+  return JSON.parse(body.result.content[0].text);
+}
+
+let codexToken;
+
+await test('管理者はエージェントのトークンを発行できる（トークンは mca_ で始まる）', async () => {
+  const r = await admin('POST', '/admin/agents', { name: 'codex-mypc' });
+  assert.equal(r.status, 201);
+  assert.equal(r.body.name, 'codex-mypc');
+  assert.match(r.body.token, /^mca_[0-9a-f]{64}$/);
+  codexToken = r.body.token;
+  const list = await admin('GET', '/admin/agents');
+  assert.deepEqual(list.body.agents.map((a) => a.name), ['codex-mypc']);
+  assert.ok(!JSON.stringify(list.body).includes(codexToken), '一覧にトークンは出ない');
+});
+
+await test('不正な名前・管理者以外の発行は拒否', async () => {
+  assert.equal((await admin('POST', '/admin/agents', { name: 'Bad Name' })).status, 400);
+  assert.equal((await admin('POST', '/admin/agents', { name: 'x' }, codexToken)).status, 401, 'エージェントのトークンでは管理できない');
+  assert.equal((await admin('GET', '/admin/agents', null, null)).status, 401);
+});
+
+await test('whoami: 管理者は owner、エージェントは自分の名前', async () => {
+  assert.equal((await callAs('test-token', G, 'whoami', {})).name, 'owner');
+  const me = await callAs(codexToken, P, 'whoami', {});
+  assert.equal(me.name, 'codex-mypc');
+  assert.equal(me.kind, 'agent');
+  assert.equal(me.scope, 'p:myapp');
+});
+
+await test('書き手をサーバーが記録する（withAuthors で読める。既定の形は変わらない）', async () => {
+  await callAs(codexToken, P, 'create_entities', { entities: [{ name: 'Decision:myapp/use-d1', entityType: 'Decision', observations: ['[2026-11-16 codex] D1 を使う'] }] });
+  await callAs('test-token', P, 'add_observations', { observations: [{ entityName: 'Decision:myapp/use-d1', contents: ['[2026-11-16 owner] 承認'] }] });
+  await callAs(codexToken, P, 'create_relations', { relations: [{ from: 'Decision:myapp/use-d1', to: 'Project:myapp', relationType: 'applies_to' }] });
+
+  const plain = await callAs(codexToken, P, 'open_nodes', { names: ['Decision:myapp/use-d1'] });
+  assert.deepEqual(plain.entities[0].observations, ['[2026-11-16 codex] D1 を使う', '[2026-11-16 owner] 承認']);
+  assert.equal(plain.entities[0].createdBy, undefined);
+
+  const detailed = await callAs(codexToken, P, 'open_nodes', { names: ['Decision:myapp/use-d1'], withAuthors: true });
+  const e = detailed.entities[0];
+  assert.equal(e.createdBy, 'codex-mypc');
+  assert.deepEqual(e.observations.map((o) => o.author), ['codex-mypc', 'owner']);
+  assert.ok(e.observations[0].createdAt);
+  const rel = env.DB.db.prepare("SELECT created_by FROM relations WHERE relation_type = 'applies_to'").get();
+  assert.equal(rel.created_by, 'codex-mypc');
+});
+
+await test('発行し直すと古いトークンは使えなくなり、失効させると 401', async () => {
+  const again = await admin('POST', '/admin/agents', { name: 'codex-mypc' });
+  assert.equal(again.status, 201);
+  assert.notEqual(again.body.token, codexToken);
+  assert.equal((await post(P, { jsonrpc: '2.0', id: 1, method: 'tools/list' }, codexToken)).status, 401, '古いトークン');
+  assert.equal((await post(P, { jsonrpc: '2.0', id: 1, method: 'tools/list' }, again.body.token)).status, 200);
+
+  const del = await admin('DELETE', '/admin/agents/codex-mypc');
+  assert.equal(del.status, 200);
+  assert.equal((await post(P, { jsonrpc: '2.0', id: 1, method: 'tools/list' }, again.body.token)).status, 401);
+  assert.equal((await admin('DELETE', '/admin/agents/codex-mypc')).status, 404, '失効済み');
+  const list = await admin('GET', '/admin/agents');
+  assert.ok(list.body.agents[0].revokedAt);
+});
+
+await test('mca_ で始まる偽のトークンは 401', async () => {
+  assert.equal((await post(P, {}, 'mca_' + '0'.repeat(64))).status, 401);
 });
 
 console.log(`\n${passed} 件のテストに成功しました`);

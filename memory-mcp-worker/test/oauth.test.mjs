@@ -57,6 +57,7 @@ writeFileSync(envFile, [
 const persist = join(work, 'state');
 const shell = process.platform === 'win32';
 execFileSync('npx', ['wrangler', 'd1', 'execute', 'memory-mcp', '--local', '--persist-to', persist, '--file=schema.sql'], { stdio: 'ignore', shell });
+execFileSync('npx', ['wrangler', 'd1', 'migrations', 'apply', 'memory-mcp', '--local', '--persist-to', persist], { stdio: 'ignore', shell, env: { ...process.env, CI: '1' } });
 
 const dev = spawn('npx', ['wrangler', 'dev', '--local', '--ip', '127.0.0.1', '--port', String(PORT), '--persist-to', persist,
   '--env-file', envFile, '--show-interactive-dev-session=false', '--log-level', 'warn'], { shell, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -281,6 +282,36 @@ try {
     });
     const data = JSON.parse((await read.json()).result.content[0].text);
     assert.equal(data.entities.length, 1);
+  });
+
+  await test('OAuth のユーザーは github:<ユーザー名> として記録される', async () => {
+    const res = await fetch(`${ORIGIN}/mcp/global`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokens.access_token}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'whoami', arguments: {} } }),
+    });
+    const me = JSON.parse((await res.json()).result.content[0].text);
+    assert.equal(me.name, 'github:Alice');
+    assert.equal(me.kind, 'user');
+  });
+
+  await test('エージェントのトークンは OAuth を通さずに使え、管理は管理者トークンだけ', async () => {
+    const created = await fetch(`${ORIGIN}/admin/agents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LEGACY_TOKEN}` },
+      body: JSON.stringify({ name: 'codex-test' }),
+    });
+    assert.equal(created.status, 201);
+    const { token: agentToken } = await created.json();
+    const res = await fetch(`${ORIGIN}/mcp/p/demo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${agentToken}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'whoami', arguments: {} } }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(JSON.parse((await res.json()).result.content[0].text).name, 'codex-test');
+    const denied = await fetch(`${ORIGIN}/admin/agents`, { headers: { Authorization: `Bearer ${tokens.access_token}` } });
+    assert.equal(denied.status, 401, 'OAuth のトークンでは管理できない');
   });
 
   await test('リフレッシュトークンで更新できる', async () => {

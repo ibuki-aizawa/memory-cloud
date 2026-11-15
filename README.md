@@ -29,6 +29,7 @@ AI:     （記憶に追記）「ヘッダーの前後の空白で認証が失敗
 - **AI をまたいで使える**: AI がツールを呼び出すための共通規格 [MCP](https://modelcontextprotocol.io/) に対応しています。
   Claude Code / Codex CLI / Gemini CLI / Cursor / VS Code（Copilot）/ Windsurf などから使えます
 - **プロジェクトごとに分けられる**: 全プロジェクト共通の記憶と、プロジェクトごとの記憶を分けて持てます
+- **誰が書いたかわかる**: AI ツールごとにトークンを分けるので、どの AI が書いた記憶かをサーバーが記録します
 - **AI の利用量を抑える作り**: 記憶を全部読み込むことはせず、必要なものだけを検索して読みます
 - **無料で動く**: Cloudflare の無料プランの範囲で動きます。クレジットカードの登録も不要です
 - **データは自分の手元**: 記憶は自分の Cloudflare アカウントに保存されます。第三者のサービスには預けません
@@ -140,12 +141,11 @@ bash / zsh:
 cd ..
 pwsh ./client/setup-client.ps1 -Url "$url" -Token "$token"
 
-# macOS / Linux では環境変数が自動で保存されないので、シェルの設定ファイルに追加する（bash なら ~/.bashrc）
-cat >> ~/.zshrc <<EOF
-export MEMORY_URL='$url'
-export MEMORY_TOKEN='$token'
-EOF
+# 環境変数は ~/.memory-cloud.env に保存されるので、シェルの起動時に読み込むようにする（bash なら ~/.bashrc）
+echo '[ -f ~/.memory-cloud.env ] && . ~/.memory-cloud.env' >> ~/.zshrc
 ```
+
+AI ツールごとに専用のトークン（例: `claude-<PC 名>`）が発行され、どの AI が書いた記憶かを区別できるようになります。
 
 終わったら、ターミナルとエディターを開き直してください。
 Claude Code なら `/mcp` コマンドで `memory-global` が connected になっていれば成功です。
@@ -175,7 +175,8 @@ macOS で Cursor や VS Code が環境変数を読めない場合は、ターミ
 |---|---|
 | [docs/memory-model.md](docs/memory-model.md) | 記憶の形、AI に渡すルール、ツールの一覧、server-memory からの移行 |
 | [docs/clients.md](docs/clients.md) | AI ツールごとの設定ファイル、手で設定する方法 |
-| [docs/operations.md](docs/operations.md) | 記憶の確認と修正、バックアップ、困ったとき、セキュリティ |
+| [docs/agents.md](docs/agents.md) | エージェントの識別（AI ツールごとのトークン、書き手の記録） |
+| [docs/operations.md](docs/operations.md) | 記憶の確認と修正、新しい版への更新、バックアップ、困ったとき、セキュリティ |
 
 ## ディレクトリ構成
 

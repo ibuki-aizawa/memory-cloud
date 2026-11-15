@@ -18,6 +18,23 @@ npx wrangler d1 execute memory-mcp --remote --command "UPDATE observations SET c
 データベース上のスコープの値は、共通が `global`、プロジェクトが `p:<略称>` です。
 テーブルの定義は [`memory-mcp-worker/schema.sql`](../memory-mcp-worker/schema.sql) にあります。
 
+## サーバーを新しい版にする
+
+リポジトリを更新（`git pull`）したら、データベースの変更を適用してからデプロイします。
+
+```sh
+npm install
+npm run db:export         # 念のためバックアップ
+npm run db:migrate        # データベースの変更を適用（適用済みのものは飛ばす）
+npm run deploy
+```
+
+新しい機能を AI ツールでも使うために、各 PC で README の手順 2 のスクリプトを再実行してください。
+
+## エージェントのトークン
+
+AI ツールごとのトークンの発行・一覧・失効は [agents.md](agents.md) を見てください。
+
 ## バックアップ
 
 ```sh
@@ -52,7 +69,8 @@ npm run test:oauth        # OAuth のテスト。ローカルでサーバーを�
 | Codex でプロジェクトの memory-project が出ない | プロジェクトを trusted にする。`.codex/config.toml` の URL が `{{MEMORY_URL}}` のままなら `init-project.ps1` を再実行 |
 | 設定ファイルを壊してしまった | スクリプトが残した `<ファイル名>.bak` から戻す |
 | デプロイで D1 や KV のエラー | `wrangler.jsonc` の `database_id` / `id` が自分の値になっているか確認（README の「1. サーバーを用意する」） |
-| 401 Unauthorized | トークンの不一致。`wrangler secret put` した値と環境変数を見比べる |
+| 401 Unauthorized | トークンの不一致か失効。管理者トークンなら `wrangler secret put` した値と見比べ、エージェントのトークンなら `agent-token.ps1 list` で有効か確認する |
+| `no such column: created_by` などのエラー | データベースの変更が未適用。`npm run db:migrate` を実行する |
 | 404 | URL の誤り。`/mcp/global` か `/mcp/p/<略称>` か確認する。略称は英小文字・数字・ハイフンのみ |
 | D1 の上限エラー | 無料枠（1 日 読み取り 500 万行 / 書き込み 10 万行）の超過。UTC 0 時（日本時間 9 時）に回復 |
 
