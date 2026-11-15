@@ -5,6 +5,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import worker from '../src/mcp.js';
 import { clientSlug, userIdentity } from '../src/agents.js';
+import { nicknameKey } from '../src/mcp.js';
 
 // --- D1 互換の最小シム ------------------------------------------------------
 class Stmt {
@@ -420,6 +421,21 @@ await test('set_profile: 重複・予約語・使えない文字は拒否', asyn
   }
   assert.equal((await tool(claudeTok, 'set_profile', { nickname: 'claude-a' })).nickname, 'claude-a', '自分の本人確認の名前は使える');
   assert.equal((await tool(claudeTok, 'set_profile', { nickname: 'ソラ' })).nickname, 'ソラ');
+});
+
+await test('呼び名の重複判定は大文字小文字を Unicode でそろえる。呼び名と同じ名前のエージェントは発行できない', async () => {
+  assert.equal(nicknameKey('ΟΔΥΣΣΕΥΣ'), nicknameKey('οδυσσευς'), 'σ と ς');
+  assert.equal(nicknameKey('Straße'), nicknameKey('STRASSE'), 'ß と ss');
+  assert.equal(nicknameKey('ﾐﾅﾄ'), nicknameKey('ミナト'));
+  await tool(codexTok, 'set_profile', { nickname: 'ΟΔΥΣΣΕΥΣ' });
+  assert.ok((await tool(claudeTok, 'set_profile', { nickname: 'οδυσσευς' })).error, '語末の ς でも同じ名前');
+  await tool(codexTok, 'set_profile', { nickname: 'minato' });
+  const r = await admin('POST', '/admin/agents', { name: 'minato' });
+  assert.equal(r.status, 409, 'ほかの AI の呼び名と同じ名前は発行できない');
+  assert.ok(r.body.error.includes('codex-b'));
+  assert.equal((await admin('POST', '/admin/agents', { name: 'codex-b' })).status, 201, '自分の呼び名と同じ自分の名前は発行し直せる');
+  codexTok = (await admin('POST', '/admin/agents', { name: 'codex-b' })).body.token;
+  await tool(codexTok, 'set_profile', { nickname: 'ミナト', bio: 'レビュー担当' });
 });
 
 await test('呼び名を宛先に使え、受信箱・タスク・書き手の表示に呼び名が添えられる', async () => {

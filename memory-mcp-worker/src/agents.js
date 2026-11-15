@@ -76,6 +76,14 @@ export async function handleAdmin(request, env) {
     if (!AGENT_NAME.test(name)) {
       return Response.json({ error: 'name は英小文字・数字・. _ - の 63 文字以内で、先頭は英小文字か数字にしてください' }, { status: 400 });
     }
+    // ほかの AI の呼び名と同じ名前は発行しない（宛先ではエージェント名が優先されるので、その呼び名宛てが誤って届くため）
+    const clash = await db
+      .prepare('SELECT identity FROM profiles WHERE nickname_key = ?1 AND identity <> ?1')
+      .bind(name)
+      .first();
+    if (clash) {
+      return Response.json({ error: `${name} は ${clash.identity} の呼び名として使われています。別の名前にしてください` }, { status: 409 });
+    }
     const token = AGENT_TOKEN_PREFIX + randomHex(32);
     await db
       .prepare(

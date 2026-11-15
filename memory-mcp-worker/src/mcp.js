@@ -1125,8 +1125,12 @@ function addNickname(obj, field, map) {
   return obj;
 }
 
-function nicknameKey(nickname) {
-  return nickname.normalize('NFKC').toLowerCase();
+/**
+ * 呼び名の重複を判定する形。全角・半角（NFKC）と大文字・小文字を同一視する。
+ * 大文字にしてから小文字にすることで、ς / σ / Σ や ß / ss のような一対一でない対応もそろえる（Unicode の case folding に近い形）
+ */
+export function nicknameKey(nickname) {
+  return nickname.normalize('NFKC').toUpperCase().toLowerCase().normalize('NFKC');
 }
 
 /** 呼び名の検証。文字・数字で始まり、文字・数字・_ . - ・ だけ（空白・: / は宛先と紛れるので使えない） */
