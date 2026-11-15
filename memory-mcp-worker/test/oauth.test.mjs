@@ -342,6 +342,11 @@ try {
     await callTool(holder, 'task_handoff', { id: task.id, to: 'codex-test', note: 'レビューお願いします', status: 'review' });
     const inbox = await callTool(agentToken, 'read_inbox', {});
     assert.equal(inbox.messages.at(-1).taskId, task.id);
+
+    // 呼び名（実際の D1 での upsert と、日本語の呼び名を宛先に使う）
+    assert.equal((await callTool(agentToken, 'set_profile', { nickname: 'テスト係' })).nickname, 'テスト係');
+    assert.equal((await callTool(agentToken, 'set_profile', { nickname: 'テスト係', bio: '付け直し' })).bio, '付け直し');
+    assert.equal((await callTool(tokens.access_token, 'send_message', { to: 'テスト係', body: 'hi' })).to, 'codex-test');
   });
 
   await test('リフレッシュトークンで更新できる', async () => {

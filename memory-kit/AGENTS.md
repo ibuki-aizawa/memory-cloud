@@ -11,7 +11,8 @@
 - 命名: 種別:スコープ/名前（例 Decision:{{PROJECT}}/use-sqlite）。スコープは {{PROJECT}} か global
 - 種別は Project, Component, Decision, Convention, Lesson, Agent, Tech, Person のみ
 - 関係は part_of, applies_to, supersedes, uses, about, responsible_for のみ
-- observation は "[YYYY-MM-DD 書き手] 1文"。書き手は whoami で確認した自分の名前（サーバーも書き手を自動で記録する）
+- observation は "[YYYY-MM-DD 書き手] 1文"。書き手は whoami で確認した自分の名前 name（呼び名ではない。サーバーも書き手を自動で記録する）
+- whoami に nickname があれば、それが自分の呼び名。ユーザーに名前を付けられたら set_profile で登録する
 - 誰がいつ書いたかを確かめたいときは open_nodes に withAuthors: true を付ける
 - 保存前に search_nodes で重複確認。新規作成より既存への add_observations を優先
 - 保存するのは今後も再利用する事実・決定・教訓だけ。作業ログは保存しない
@@ -24,6 +25,7 @@
 - タスクと受信箱は memory-project にある。作業の始めに whoami を呼び、unreadMessages があれば read_inbox、myActiveTasks があれば task_list { mine: true } を確認する
 - 依頼された作業は task_list で既存のタスクを探し、なければ task_create { claim: true } で作る。作業する前に必ず task_claim で引き受ける
 - ほかのエージェントが担当中のタスクには手を出さない。必要なら note を残すか send_message で相談する
+- send_message / task_handoff の宛先には、相手の名前（name）か呼び名（nickname）を使う
 - 作業は自分のブランチ（例 <自分の名前>/<タスク番号>）か git worktree で行い、ほかのエージェントと同じファイルを同時に書き換えない
 - 長い作業では区切りごとに task_update で note を残す（担当の期限 30 分が延びる）
 - 終わったら task_update { status: "done", note: 結果 }。レビューが要るなら task_handoff { to, status: "review", note: ブランチ名と見てほしい点 }

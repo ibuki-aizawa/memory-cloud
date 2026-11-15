@@ -35,6 +35,8 @@ const HANDOFF_LEASE_HOURS = 24;   // task_handoff で渡された側の期限
 const TASK_LIST_LIMIT = 50;
 const INBOX_LIMIT = 20;
 const MAX_AGENT_NAME = 100;
+const MAX_NICKNAME = 32;
+const MAX_BIO = 200;
 
 // ---------------------------------------------------------------------------
 // ツール定義
@@ -164,8 +166,20 @@ const TOOLS = [
   },
   {
     name: 'whoami',
-    description: 'このサーバーが認識している自分（接続しているエージェント）の名前と種類、未読メッセージ数、自分が担当中のタスク数を返します。observation の書き手にはこの名前を使ってください。',
+    description: 'このサーバーが認識している自分（接続しているエージェント）の名前（name）と種類、呼び名（nickname）、未読メッセージ数、自分が担当中のタスク数を返します。observation の書き手には name を使ってください。',
     inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'set_profile',
+    description: `自分の呼び名（ニックネーム）とひとこと自己紹介を登録します。ユーザーに「あなたの名前は○○」と言われたとき、または名前を考えるよう頼まれたときに使います。呼び名はほかのエージェントと重ならないものにしてください（${MAX_NICKNAME} 文字まで、空白なし）。呼び名は send_message / task_handoff の宛先にも使えます。本人確認の名前（whoami の name）は変わりません。`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        nickname: { type: 'string', description: '呼び名（例: ミナト、sora）' },
+        bio: { type: 'string', description: `ひとこと自己紹介（${MAX_BIO} 文字まで。例: レビュー担当）` },
+      },
+      required: ['nickname'],
+    },
   },
 
   // --- 協調（タスクボードと受信箱）。タスクとメッセージはスコープ（プロジェクト）ごと ---
@@ -390,6 +404,7 @@ function scopeInstructions(scope) {
   const common = [
     '記憶の使い方:',
     '- 会話の始めに whoami を 1 回呼ぶ。unreadMessages があれば read_inbox、myActiveTasks があれば task_list { mine: true } を確認する',
+    '- whoami に nickname があれば、それが自分の呼び名。ユーザーに名前を付けられたら set_profile で登録する（ほかのエージェントにも呼び名で宛てられる）',
     '- 必要になったら search_nodes で探す（上位 10 件と抜粋だけ返る）。全文が要るものだけ open_nodes で開く。read_graph はない',
     '- 保存するのは今後も使う事実・決定・教訓だけ。会話や作業のログは保存しない',
     '- 保存前に search_nodes で重複を確認し、既存のエンティティには add_observations で足す',
@@ -445,14 +460,56 @@ const HANDLERS = {
       )
       .bind(scope, identity.name)
       .first();
-    return {
-      name: identity.name,
-      kind: identity.kind,
-      scope,
-      unreadMessages: counts.unread,
-      myActiveTasks: counts.mine,
-      hint: hints[identity.kind],
-    };
+    const profile = await db.prepare('SELECT nickname, bio FROM profiles WHERE identity = ?1').bind(identity.name).first();
+    const out = { name: identity.name, kind: identity.kind, scope };
+    if (profile) {
+      out.nickname = profile.nickname;
+      if (profile.bio) out.bio = profile.bio;
+    }
+    out.unreadMessages = counts.unread;
+    out.myActiveTasks = counts.mine;
+    out.hint = hints[identity.kind];
+    if (!profile) out.profileHint = '呼び名が未設定です。ユーザーに名前を付けてもらったら set_profile で登録してください';
+    return out;
+  },
+
+  async set_profile(args, { db, identity }) {
+    const nickname = nicknameOf(args.nickname);
+    const key = nicknameKey(nickname);
+    const bio = optionalStr(args.bio, 'bio', MAX_BIO);
+
+    // 予約された名前・ほかのエージェントの本人確認の名前・ほかの人の呼び名とは重ねない（宛先が決まらなくなるため）
+    if (['owner', 'admin'].includes(key) || key.startsWith('github')) {
+      throw new ToolInputError(`${nickname} は予約されているので使えません`);
+    }
+    const clash = await db
+      .prepare(
+        `SELECT name AS identity FROM agents WHERE lower(name) = ?1 AND name <> ?2
+         UNION ALL
+         SELECT identity FROM profiles WHERE nickname_key = ?1 AND identity <> ?2
+         LIMIT 1`
+      )
+      .bind(key, identity.name)
+      .first();
+    if (clash) throw new ToolInputError(`呼び名 ${nickname} は ${clash.identity} が使っています。別の名前にしてください`);
+
+    try {
+      await db
+        .prepare(
+          `INSERT INTO profiles (identity, nickname, nickname_key, bio) VALUES (?1, ?2, ?3, ?4)
+           ON CONFLICT (identity) DO UPDATE SET nickname = excluded.nickname, nickname_key = excluded.nickname_key,
+             bio = excluded.bio, updated_at = datetime('now')`
+        )
+        .bind(identity.name, nickname, key, bio)
+        .run();
+    } catch (err) {
+      // 同時に同じ呼び名を登録しようとしたとき（UNIQUE 制約）
+      if (/UNIQUE/i.test(String(err && err.message))) throw new ToolInputError(`呼び名 ${nickname} はほかのエージェントが使っています`);
+      throw err;
+    }
+    const out = { name: identity.name, nickname };
+    if (bio) out.bio = bio;
+    return out;
   },
 
   // --- 協調 -----------------------------------------------------------------
@@ -493,7 +550,10 @@ const HANDLERS = {
       )
       .bind(...(mine ? [scope, JSON.stringify(statuses), author] : [scope, JSON.stringify(statuses)]))
       .all();
-    const out = { tasks: results.slice(0, TASK_LIST_LIMIT).map((r) => taskView(r, false)) };
+    const tasks = results.slice(0, TASK_LIST_LIMIT).map((r) => taskView(r, false));
+    const nick = await nicknames(db, tasks.map((t) => t.assignee));
+    for (const t of tasks) addNickname(t, 'assignee', nick);
+    const out = { tasks };
     if (results.length > TASK_LIST_LIMIT) out.more = true;
     return out;
   },
@@ -506,6 +566,10 @@ const HANDLERS = {
       .prepare('SELECT actor, kind, status, note, created_at AS createdAt FROM task_events WHERE task_id = ?1 ORDER BY id')
       .bind(id)
       .all();
+    const nick = await nicknames(db, [task.assignee, task.createdBy, ...results.map((e) => e.actor)]);
+    addNickname(task, 'assignee', nick);
+    addNickname(task, 'createdBy', nick);
+    for (const e of results) addNickname(e, 'actor', nick);
     return { task, events: results };
   },
 
@@ -649,7 +713,9 @@ const HANDLERS = {
       db.prepare('INSERT INTO messages (scope, to_agent, from_agent, body, task_id) VALUES (?1, ?2, ?3, ?4, ?5)')
         .bind(scope, to, author, `タスク #${id}「${current.title}」を${status === 'review' ? 'レビュー依頼として' : ''}引き継ぎました: ${note}`, id),
     ]);
-    return { task: await getTask(db, scope, id), notified: to };
+    const out = { task: await getTask(db, scope, id), notified: to };
+    addNickname(out, 'notified', await nicknames(db, [to]));
+    return out;
   },
 
   async send_message(args, { db, scope, author }) {
@@ -664,7 +730,9 @@ const HANDLERS = {
       .prepare('INSERT INTO messages (scope, to_agent, from_agent, body, task_id) VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id')
       .bind(scope, to, author, body, task)
       .first();
-    return { sent: true, id: row.id, to };
+    const out = { sent: true, id: row.id, to };
+    addNickname(out, 'to', await nicknames(db, [to]));
+    return out;
   },
 
   async read_inbox(args, { db, scope, author }) {
@@ -687,9 +755,11 @@ const HANDLERS = {
         .bind(JSON.stringify(unreadIds))
         .run();
     }
+    const nick = await nicknames(db, messages.map((m) => m.from));
     const out = {
       messages: messages.map((m) => {
         const item = { id: m.id, from: m.from, body: m.body, createdAt: m.createdAt };
+        addNickname(item, 'from', nick);
         if (m.taskId !== null) item.taskId = m.taskId;
         if (includeRead) item.read = !!m.readAt;
         return item;
@@ -922,6 +992,9 @@ const HANDLERS = {
     }
 
     const found = new Set(rows.map((r) => r.name));
+    const nick = withAuthors
+      ? await nicknames(db, [...rows.map((r) => r.created_by), ...[...obsByEntity.values()].flat().map((o) => o.author)])
+      : new Map();
     const out = {
       entities: rows.map((r) => {
         const obs = obsByEntity.get(r.id) || [];
@@ -929,7 +1002,10 @@ const HANDLERS = {
           // 既定は server-memory と同じ形（文字列の配列）。AI の利用量を抑えるため
           return { name: r.name, entityType: r.entity_type, observations: obs.map((o) => o.content) };
         }
-        return { name: r.name, entityType: r.entity_type, createdBy: r.created_by, observations: obs };
+        const e = { name: r.name, entityType: r.entity_type, createdBy: r.created_by };
+        addNickname(e, 'createdBy', nick);
+        e.observations = obs.map((o) => addNickname({ ...o }, 'author', nick));
+        return e;
       }),
       relations,
     };
@@ -1013,8 +1089,54 @@ async function agentName(db, value, field) {
   if (name === 'owner' || /^github:[A-Za-z0-9-]+(\/[a-z0-9._-]+)?$/.test(name)) return name;
   const row = await db.prepare('SELECT name FROM agents WHERE name = ?1 AND revoked_at IS NULL').bind(name).first();
   if (row) return name;
-  const { results } = await db.prepare('SELECT name FROM agents WHERE revoked_at IS NULL ORDER BY name').all();
-  throw new ToolInputError(`${field}: エージェント ${name} は登録されていません。登録済み: ${['owner', ...results.map((r) => r.name)].join(', ')}`);
+  // 呼び名なら、その本人確認の名前に読み替える
+  const byNickname = await db.prepare('SELECT identity FROM profiles WHERE nickname_key = ?1').bind(nicknameKey(name)).first();
+  if (byNickname) return byNickname.identity;
+  const { results } = await db
+    .prepare(
+      `SELECT a.name AS name, p.nickname AS nickname FROM agents AS a LEFT JOIN profiles AS p ON p.identity = a.name
+       WHERE a.revoked_at IS NULL
+       UNION
+       SELECT p.identity, p.nickname FROM profiles AS p WHERE p.identity NOT IN (SELECT name FROM agents)
+       ORDER BY 1`
+    )
+    .all();
+  const known = ['owner', ...results.map((r) => (r.nickname ? `${r.nickname}（${r.name}）` : r.name))];
+  throw new ToolInputError(`${field}: エージェント ${name} は登録されていません。登録済み: ${known.join(', ')}`);
+}
+
+/** 本人確認の名前 → 呼び名 の Map */
+async function nicknames(db, names) {
+  const list = unique(names.filter(Boolean));
+  const map = new Map();
+  if (!list.length) return map;
+  const { results } = await db
+    .prepare('SELECT identity, nickname FROM profiles WHERE identity IN (SELECT value FROM json_each(?1))')
+    .bind(JSON.stringify(list))
+    .all();
+  for (const r of results) map.set(r.identity, r.nickname);
+  return map;
+}
+
+/** obj[field] に呼び名があれば obj[field + 'Nickname'] に添える（なければ何も足さない。利用量を抑えるため） */
+function addNickname(obj, field, map) {
+  const n = obj[field] && map.get(obj[field]);
+  if (n) obj[`${field}Nickname`] = n;
+  return obj;
+}
+
+function nicknameKey(nickname) {
+  return nickname.normalize('NFKC').toLowerCase();
+}
+
+/** 呼び名の検証。文字・数字で始まり、文字・数字・_ . - ・ だけ（空白・: / は宛先と紛れるので使えない） */
+function nicknameOf(value) {
+  const v = str(value, 'nickname', MAX_NICKNAME * 2).normalize('NFKC');
+  if ([...v].length > MAX_NICKNAME) throw new ToolInputError(`nickname は ${MAX_NICKNAME} 文字以内にしてください`);
+  if (!/^[\p{L}\p{N}][\p{L}\p{N}\p{M}_.\-・]*$/u.test(v)) {
+    throw new ToolInputError('nickname は文字か数字で始め、文字・数字・_ . - ・ だけを使ってください（空白・: / は使えません）');
+  }
+  return v;
 }
 
 function taskId(value, field = 'id') {

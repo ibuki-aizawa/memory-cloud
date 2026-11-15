@@ -395,6 +395,65 @@ await test('担当でない人のメモでは期限が延びない', async () =>
   assert.ok(own.task.leaseExpiresAt > '2000-01-01 00:00:00', '担当者なら延びる');
 });
 
+await test('set_profile: 呼び名を登録すると whoami に出る（未設定ならヒント）', async () => {
+  const before = await tool(codexTok, 'whoami', {});
+  assert.equal(before.nickname, undefined);
+  assert.ok(before.profileHint);
+  const r = await tool(codexTok, 'set_profile', { nickname: 'ミナト', bio: 'レビュー担当' });
+  assert.deepEqual(r, { name: 'codex-b', nickname: 'ミナト', bio: 'レビュー担当' });
+  const me = await tool(codexTok, 'whoami', {}, G);
+  assert.equal(me.name, 'codex-b', '本人確認の名前は変わらない');
+  assert.equal(me.nickname, 'ミナト', '呼び名はスコープをまたいで共通');
+  assert.equal(me.profileHint, undefined);
+  // 付け直し（自分の呼び名は大文字小文字を変えても使える）
+  assert.equal((await tool(codexTok, 'set_profile', { nickname: 'Minato' })).nickname, 'Minato');
+  assert.equal((await tool(codexTok, 'set_profile', { nickname: 'minato' })).nickname, 'minato');
+  await tool(codexTok, 'set_profile', { nickname: 'ミナト', bio: 'レビュー担当' });
+});
+
+await test('set_profile: 重複・予約語・使えない文字は拒否', async () => {
+  assert.ok((await tool(claudeTok, 'set_profile', { nickname: 'ミナト' })).error.includes('codex-b'), 'ほかの人の呼び名');
+  assert.ok((await tool(claudeTok, 'set_profile', { nickname: 'ﾐﾅﾄ' })).error, '半角カナも同じ呼び名とみなす（NFKC）');
+  assert.ok((await tool(claudeTok, 'set_profile', { nickname: 'CODEX-B' })).error, 'ほかのエージェントの本人確認の名前');
+  for (const bad of ['owner', 'Admin', 'github-bot', 'a b', 'x/y', 'a:b', '-x', 'あ'.repeat(33)]) {
+    assert.ok((await tool(claudeTok, 'set_profile', { nickname: bad })).error, bad);
+  }
+  assert.equal((await tool(claudeTok, 'set_profile', { nickname: 'claude-a' })).nickname, 'claude-a', '自分の本人確認の名前は使える');
+  assert.equal((await tool(claudeTok, 'set_profile', { nickname: 'ソラ' })).nickname, 'ソラ');
+});
+
+await test('呼び名を宛先に使え、受信箱・タスク・書き手の表示に呼び名が添えられる', async () => {
+  const sent = await tool(claudeTok, 'send_message', { to: 'ミナト', body: '呼び名で送ります' });
+  assert.equal(sent.to, 'codex-b', '本人確認の名前に読み替えて届ける');
+  assert.equal(sent.toNickname, 'ミナト');
+  const inbox = await tool(codexTok, 'read_inbox', {});
+  const msg = inbox.messages.find((m) => m.body === '呼び名で送ります');
+  assert.equal(msg.from, 'claude-a');
+  assert.equal(msg.fromNickname, 'ソラ');
+
+  const { task } = await tool(claudeTok, 'task_create', { title: '呼び名で引き継ぐ', claim: true });
+  const h = await tool(claudeTok, 'task_handoff', { id: task.id, to: 'ミナト', note: 'お願いします' });
+  assert.equal(h.notified, 'codex-b');
+  assert.equal(h.notifiedNickname, 'ミナト');
+  const detail = await tool(codexTok, 'task_get', { id: task.id });
+  assert.equal(detail.task.assigneeNickname, 'ミナト');
+  assert.equal(detail.task.createdByNickname, 'ソラ');
+  assert.equal(detail.events[0].actorNickname, 'ソラ');
+  const listed = (await tool(codexTok, 'task_list', { mine: true })).tasks.find((t) => t.id === task.id);
+  assert.equal(listed.assigneeNickname, 'ミナト');
+
+  await tool(claudeTok, 'create_entities', { entities: [{ name: 'Lesson:myapp/nickname', entityType: 'Lesson', observations: ['[2026-11-15 claude-a] 呼び名のテスト'] }] });
+  const plain = await tool(claudeTok, 'open_nodes', { names: ['Lesson:myapp/nickname'] });
+  assert.deepEqual(plain.entities[0].observations, ['[2026-11-15 claude-a] 呼び名のテスト'], '既定の形は変わらない');
+  const withAuthors = await tool(claudeTok, 'open_nodes', { names: ['Lesson:myapp/nickname'], withAuthors: true });
+  assert.equal(withAuthors.entities[0].createdByNickname, 'ソラ');
+  assert.equal(withAuthors.entities[0].observations[0].author, 'claude-a', '記録は本人確認の名前のまま');
+  assert.equal(withAuthors.entities[0].observations[0].authorNickname, 'ソラ');
+
+  const unknown = await tool(claudeTok, 'send_message', { to: 'だれか', body: 'x' });
+  assert.ok(unknown.error.includes('ミナト（codex-b）'), '登録済みの一覧に呼び名も出る');
+});
+
 await test('協調ツールの入力エラー', async () => {
   assert.ok((await tool(claudeTok, 'task_create', { title: ' ' })).error);
   assert.ok((await tool(claudeTok, 'task_claim', { id: 'abc' })).error);
