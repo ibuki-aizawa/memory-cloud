@@ -358,6 +358,43 @@ await test('send_message: 登録されていない宛先は拒否、受信箱は
   assert.ok((await tool(claudeTok, 'send_message', { to: 'codex-b', body: 'x', taskId: 9999 })).error);
 });
 
+await test('引き受けずに status は変えられない（未担当・期限切れ・終わったタスク）', async () => {
+  // 未担当: 作成者でもほかの人でも、先に引き受ける必要がある
+  const { task: t1 } = await tool(claudeTok, 'task_create', { title: '未担当のタスク' });
+  assert.ok((await tool(codexTok, 'task_update', { id: t1.id, status: 'done' })).error.includes('task_claim'));
+  assert.ok((await tool(claudeTok, 'task_update', { id: t1.id, status: 'cancelled' })).error.includes('task_claim'));
+  assert.ok((await tool(codexTok, 'task_handoff', { id: t1.id, to: 'codex-b', note: 'x' })).error.includes('task_claim'), '作成者以外は未担当のタスクを渡せない');
+
+  // 期限切れ: 元の担当者以外は、引き受け直してから
+  const { task: t2 } = await tool(claudeTok, 'task_create', { title: '期限切れのタスク', claim: true });
+  env.DB.db.prepare("UPDATE tasks SET lease_expires_at = datetime('now', '-1 minutes') WHERE id = ?").run(t2.id);
+  assert.ok((await tool(codexTok, 'task_update', { id: t2.id, status: 'done' })).error.includes('task_claim'));
+  assert.ok((await tool(codexTok, 'task_handoff', { id: t2.id, to: 'codex-b', note: 'x' })).error.includes('task_claim'));
+
+  // 終わったタスク: 作成者か最後の担当者が open に戻すことだけできる
+  await tool(claudeTok, 'task_claim', { id: t2.id });
+  assert.equal((await tool(claudeTok, 'task_update', { id: t2.id, status: 'done' })).task.status, 'done');
+  assert.ok((await tool(claudeTok, 'task_update', { id: t2.id, status: 'in_progress' })).error.includes('open'));
+  assert.ok((await tool(codexTok, 'task_update', { id: t2.id, status: 'open' })).error.includes('作成者'));
+  const reopened = await tool(claudeTok, 'task_update', { id: t2.id, status: 'open', note: 'やり直し' });
+  assert.equal(reopened.task.status, 'open');
+  assert.equal(reopened.task.assignee, null);
+
+  // 管理者トークンは例外
+  assert.equal((await tool('test-token', 'task_update', { id: t1.id, status: 'cancelled' })).task.status, 'cancelled');
+});
+
+await test('担当でない人のメモでは期限が延びない', async () => {
+  const { task } = await tool(claudeTok, 'task_create', { title: '期限のテスト', claim: true });
+  await tool(claudeTok, 'task_handoff', { id: task.id, to: 'codex-b', note: '渡します' });
+  env.DB.db.prepare("UPDATE tasks SET lease_expires_at = '2000-01-01 00:00:00' WHERE id = ?").run(task.id);
+  const r = await tool(claudeTok, 'task_update', { id: task.id, note: '元の担当者の遅れたメモ' });
+  assert.equal(r.task.leaseExpiresAt, '2000-01-01 00:00:00', '新しい担当者の期限はそのまま');
+  assert.equal(r.task.assignee, 'codex-b');
+  const own = await tool(codexTok, 'task_update', { id: task.id, note: '担当者のメモ' });
+  assert.ok(own.task.leaseExpiresAt > '2000-01-01 00:00:00', '担当者なら延びる');
+});
+
 await test('協調ツールの入力エラー', async () => {
   assert.ok((await tool(claudeTok, 'task_create', { title: ' ' })).error);
   assert.ok((await tool(claudeTok, 'task_claim', { id: 'abc' })).error);

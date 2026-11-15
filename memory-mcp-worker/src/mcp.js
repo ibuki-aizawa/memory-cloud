@@ -205,7 +205,7 @@ const TOOLS = [
   },
   {
     name: 'task_update',
-    description: `進捗を記録します。status を変えられるのは担当者だけ（open にすると担当を外して手放す）。note だけなら誰でも書けます。担当者が呼ぶと期限が ${LEASE_MINUTES} 分延びます。`,
+    description: `進捗を記録します。status を変えられるのは担当者だけで、未担当のタスクは先に task_claim で引き受けます（open にすると担当を外して手放す。done / cancelled は作成者か最後の担当者が open で再開できる）。note だけなら誰でも書けます。担当者が呼ぶと期限が ${LEASE_MINUTES} 分延びます。`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -218,7 +218,7 @@ const TOOLS = [
   },
   {
     name: 'task_handoff',
-    description: `タスクをほかのエージェントに渡し、相手の受信箱に知らせます。レビューを頼むときは status: "review"。渡した相手の担当期限は ${HANDOFF_LEASE_HOURS} 時間です。`,
+    description: `タスクをほかのエージェントに渡し、相手の受信箱に知らせます。渡せるのは担当者（未担当のタスクなら作成者）。レビューを頼むときは status: "review"。渡した相手の担当期限は ${HANDOFF_LEASE_HOURS} 時間です。`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -548,34 +548,52 @@ const HANDLERS = {
 
     const current = await getTask(db, scope, id);
     if (!current) throw new ToolInputError(`タスク ${id} はありません`);
-    const mineNow = current.assignee === author;
-    const heldByOther = current.assignee && !mineNow && !current.expired && ACTIVE_STATUSES.includes(current.status);
+    const active = ACTIVE_STATUSES.includes(current.status);
+    const mine = current.assignee === author;
+    const isAdmin = identity.kind === 'admin';
+    const expected = [current.assignee, current.leaseExpiresAt ?? null];
 
     if (status === null) {
-      // メモだけ。担当者なら期限を延ばす
-      if (mineNow && ACTIVE_STATUSES.includes(current.status)) {
-        await db
-          .prepare(`UPDATE tasks SET lease_expires_at = datetime('now', '+${LEASE_MINUTES} minutes'), updated_at = datetime('now') WHERE id = ?1`)
-          .bind(id)
-          .run();
-      } else {
-        await db.prepare(`UPDATE tasks SET updated_at = datetime('now') WHERE id = ?1`).bind(id).run();
-      }
+      // メモだけ（誰でも書ける）。担当者なら期限を延ばす。
+      // 読んでから書くまでに担当が変わっていたら延ばさない（新しい担当者の期限を古い担当者が延ばさないように）
+      const extend = mine && active;
+      await db
+        .prepare(
+          `UPDATE tasks SET updated_at = datetime('now')
+             ${extend ? `, lease_expires_at = datetime('now', '+${LEASE_MINUTES} minutes')` : ''}
+           WHERE id = ?1 AND scope = ?2 ${extend ? 'AND assignee IS ?3 AND lease_expires_at IS ?4' : ''}`
+        )
+        .bind(...(extend ? [id, scope, ...expected] : [id, scope]))
+        .run();
       await addEvent(db, id, author, 'updated', current.status, note);
       return { task: await getTask(db, scope, id) };
     }
 
-    if (heldByOther && identity.kind !== 'admin') {
-      throw new ToolInputError(`${current.assignee} が担当中なので status は変えられません。note だけ書くか、send_message で相談してください`);
+    // status を変えられるのは:
+    //   終わっていないタスク … 担当者だけ（未担当・ほかの担当者のタスクは、先に task_claim で引き受ける）
+    //   done / cancelled   … 作成者か最後の担当者が open に戻す（再開）ことだけ
+    //   管理者トークン      … 例外としてどれでも
+    if (!isAdmin) {
+      if (active && !mine) {
+        throw new ToolInputError(
+          current.assignee && !current.expired
+            ? `${current.assignee} が担当中なので status は変えられません。note だけ書くか、send_message で相談してください`
+            : 'status を変えるには、先に task_claim で引き受けてください'
+        );
+      }
+      if (!active) {
+        if (status !== 'open') throw new ToolInputError(`このタスクは ${current.status} です。やり直すときは status: "open" で再開してください`);
+        if (current.createdBy !== author && !mine) throw new ToolInputError('再開できるのは、タスクの作成者か最後の担当者だけです');
+      }
     }
 
     let assignee;
     let lease;
     if (status === 'open') {
-      assignee = null; // 手放す
+      assignee = null; // 手放す・再開する
       lease = 'NULL';
     } else if (status === 'in_progress' || status === 'review') {
-      assignee = heldByOther ? current.assignee : author;
+      assignee = mine || !current.assignee ? author : current.assignee; // 管理者がほかの担当者のタスクを変えるときは担当を変えない
       lease = `datetime('now', '+${LEASE_MINUTES} minutes')`;
     } else {
       assignee = current.assignee || author; // done / cancelled は誰が終えたかを残す
@@ -588,7 +606,7 @@ const HANDLERS = {
         `UPDATE tasks SET status = ?3, assignee = ?4, lease_expires_at = ${lease}, updated_at = datetime('now')
          WHERE id = ?1 AND scope = ?2 AND assignee IS ?5 AND lease_expires_at IS ?6`
       )
-      .bind(id, scope, status, assignee, current.assignee, current.leaseExpiresAt ?? null)
+      .bind(id, scope, status, assignee, ...expected)
       .run();
     if (!changes(res)) throw new ToolInputError('ほかのエージェントが同時に更新しました。task_get で確認してからやり直してください');
     await addEvent(db, id, author, status === 'open' ? 'released' : 'updated', status, note);
@@ -605,9 +623,15 @@ const HANDLERS = {
     const current = await getTask(db, scope, id);
     if (!current) throw new ToolInputError(`タスク ${id} はありません`);
     if (!ACTIVE_STATUSES.includes(current.status)) throw new ToolInputError(`このタスクは ${current.status} です`);
-    const heldByOther = current.assignee && current.assignee !== author && !current.expired;
-    if (heldByOther && identity.kind !== 'admin') {
-      throw new ToolInputError(`${current.assignee} が担当中なので渡せません`);
+    // 渡せるのは担当者、未担当なら作成者（作ってすぐ誰かに頼む流れ）。管理者トークンは例外
+    const mine = current.assignee === author;
+    const unassignedMine = !current.assignee && current.createdBy === author;
+    if (!mine && !unassignedMine && identity.kind !== 'admin') {
+      throw new ToolInputError(
+        current.assignee && !current.expired
+          ? `${current.assignee} が担当中なので渡せません`
+          : '渡すには、先に task_claim で引き受けてください'
+      );
     }
 
     const res = await db
