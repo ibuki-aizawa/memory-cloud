@@ -1,383 +1,158 @@
-# memory-cloud — Cloudflare Workers + D1 で動く AI エージェントの共有メモリ
+# memory-cloud
 
-server-memory と同じツール（`create_entities` / `search_nodes` / `open_nodes` など）を、
-Cloudflare 上のリモート MCP サーバー（Streamable HTTP）として動かします。
-どの PC・どのエージェントからでも同じ記憶を使えます。
+**AI エージェントに覚えておいてほしいことを、どの AI・どの PC からでも共有できる記憶サーバーです。**
+Cloudflare の無料枠で動き、自分のアカウントにデプロイして使います。
+
+## これは何？
+
+AI エージェント（Claude Code、Codex、Cursor、claude.ai など）は、基本的に会話が終わると内容を忘れます。
+ツールに記憶機能があっても、その記憶は**そのツールの中だけ**のものです。
+
+- 新しい会話を始めるたびに「このプロジェクトでは SQLite を使っていて…」と説明し直す
+- 前に AI と決めた方針や、ハマって解決した問題を、AI が覚えていない
+- Claude Code に教えたことを、Cursor や Codex は知らない
+- 会社の PC と自宅の PC で、記憶がばらばら
+
+memory-cloud を使うと、AI は必要なときに記憶サーバーへ問い合わせ、決まったことや教訓を書き込みます。
+記憶はクラウドに 1 つだけあるので、**どの AI・どの PC から使っても同じ記憶**になります。
 
 ```
-memory-mcp-worker/   Cloudflare にデプロイするサーバー本体
-client/              PC ごとの接続設定・jsonl 移行スクリプト
-memory-kit/          プロジェクトにコピーするテンプレート（AGENTS.md / 各クライアントの MCP 設定 / エージェント定義）
+あなた: 認証まわりを直して
+AI:     （記憶を検索）「認証は Bearer トークン方式。トークンは定数時間比較する」と
+         決めてあるので、その方針で直します。
+...
+AI:     （記憶に追記）「ヘッダーの前後の空白で認証が失敗していた」
 ```
 
-## 対応クライアント
+## 特長
 
-MCP の Streamable HTTP に対応し、`Authorization` ヘッダーを設定できるクライアントなら使えます。
-次のクライアントは `setup-client.ps1` と `memory-kit/` で設定できます。
+- **AI をまたいで使える**: AI がツールを呼び出すための共通規格 [MCP](https://modelcontextprotocol.io/) に対応しています。
+  Claude Code / Codex CLI / Gemini CLI / Cursor / VS Code（Copilot）/ Windsurf などから使えます
+- **プロジェクトごとに分けられる**: 全プロジェクト共通の記憶と、プロジェクトごとの記憶を分けて持てます
+- **AI の利用量を抑える作り**: 記憶を全部読み込むことはせず、必要なものだけを検索して読みます
+- **無料で動く**: Cloudflare の無料プランの範囲で動きます。クレジットカードの登録も不要です
+- **データは自分の手元**: 記憶は自分の Cloudflare アカウントに保存されます。第三者のサービスには預けません
+- **導入スクリプト付き**: 各 AI ツールへの登録を、スクリプト 1 つで行えます
 
-| クライアント | ユーザー設定（memory-global） | プロジェクト設定（memory-project） | 記憶のルールを読むファイル |
-|---|---|---|---|
-| Claude Code | `~/.claude.json`（`claude mcp add`） | `.mcp.json` | `~/.claude/CLAUDE.md`、`CLAUDE.md`（→ `AGENTS.md`） |
-| Codex CLI | `~/.codex/config.toml` | `.codex/config.toml` | `~/.codex/AGENTS.md`、`AGENTS.md` |
-| Gemini CLI | `~/.gemini/settings.json` | `.gemini/settings.json` | `~/.gemini/GEMINI.md`、`AGENTS.md` |
-| Cursor | `~/.cursor/mcp.json` | `.cursor/mcp.json` | User Rules（手動で貼り付け）、`AGENTS.md` |
-| VS Code（Copilot） | `<ユーザーフォルダ>/mcp.json` | `.vscode/mcp.json` | `<ユーザーフォルダ>/prompts/memory-global.instructions.md`、`AGENTS.md` |
-| Windsurf | `~/.codeium/windsurf/mcp_config.json` | （なし。ユーザー設定に追加する） | `~/.codeium/windsurf/memories/global_rules.md`、`AGENTS.md` |
+## 仕組み
 
-サーバーは接続時（`initialize`）にスコープごとの使い方を `instructions` として返すので、
-ルールファイルを読まないクライアントでも最低限の使い方は伝わります。
+```
+ Claude Code ─┐
+ Codex CLI  ──┤                  ┌──── Cloudflare（自分のアカウント）────┐
+ Cursor     ──┼────── MCP ─────▶ │  記憶サーバー ──▶ 記憶のデータベース │
+ VS Code    ──┘                  └──────────────────────────────────────┘
+```
 
-そのほか:
-- **claude.ai などの Web 版コネクタ**: OAuth（GitHub でサインイン）で接続できます（[Web 版クライアントで使う](#web-版クライアントで使うoauth)）
-- **stdio にしか対応していないクライアント**: [mcp-remote](https://www.npmjs.com/package/mcp-remote) を挟めば使えます（[後述](#ほかのクライアントでの設定)）
+記憶サーバーは Cloudflare の **Workers**（自分のサーバーを持たずにプログラムを動かせるサービス）で動き、
+記憶は **D1**（データベース）に保存されます。操作には Cloudflare のコマンド **wrangler** を使います。
+無料プランで上限に達しても、その日のリクエストが失敗するだけで、勝手に課金されることはありません。
 
-## AWS との対応
-
-| Cloudflare | AWS でいうと | 役割 |
-|---|---|---|
-| Workers | Lambda + 関数 URL | MCP サーバー本体（URL は `*.workers.dev`） |
-| D1 | サーバーレスの SQLite（課金は行数単位） | 記憶の保存先 |
-| KV | DynamoDB（キーと値だけの単純なもの） | OAuth のトークンの保存先 |
-| wrangler | SAM CLI / CDK CLI | デプロイ・DB 操作の CLI |
-| `wrangler secret` | Lambda の暗号化環境変数 / Secrets Manager | トークンの保管 |
-| `wrangler.jsonc` | SAM テンプレート | 設定ファイル |
-
-Free プランはクレジットカード不要で、上限に達するとリクエストが失敗するだけです。AWS のように想定外の請求が来ることはありません。
-
-## スコープと URL
-
-| URL | 用途 | Claude Code での名前 |
-|---|---|---|
-| `/mcp/global` | プロジェクト横断の共通ナレッジ | `memory-global`（user スコープ） |
-| `/mcp/p/<略称>` | プロジェクトごとのナレッジ | `memory-project`（プロジェクトの `.mcp.json`） |
+記憶の形（エンティティ・observation など）や AI に渡すルールは [docs/memory-model.md](docs/memory-model.md) で説明しています。
 
 ---
 
-## 初回セットアップ（全体で 1 回）
+## 使い始める
 
-前提: Node.js 20 以上、PowerShell 7、上の表の AI クライアントのどれか。
+| 手順 | 回数 |
+|---|---|
+| [1. サーバーを用意する](#1-サーバーを用意する) | 全体で 1 回（20 分ほど） |
+| [2. PC の AI ツールをつなぐ](#2-pc-の-ai-ツールをつなぐ) | PC ごとに 1 回 |
+| [3. プロジェクトに導入する](#3-プロジェクトに導入する) | プロジェクトごとに 1 回 |
 
-### 1. Cloudflare のアカウントを作る
+必要なもの:
+- [Node.js](https://nodejs.org/) 20 以上
+- [PowerShell 7](https://learn.microsoft.com/ja-jp/powershell/scripting/install/installing-powershell)（Windows / macOS / Linux）
+- Claude Code、Codex CLI、Gemini CLI、Cursor、VS Code、Windsurf のどれか
 
-https://dash.cloudflare.com/sign-up でメールアドレスを登録し、確認メールのリンクを開きます。
+### 1. サーバーを用意する
+
+**Cloudflare のアカウントを作る**: https://dash.cloudflare.com/sign-up でメールアドレスを登録します。
 ドメインの追加を勧められても不要です（スキップしてください）。
 
-### 2. wrangler を入れてログインする
+**リポジトリを取得してログインする**:
 
 ```powershell
-cd memory-mcp-worker
-npm install               # wrangler と OAuth のライブラリが入る
+git clone https://github.com/ibuki-aizawa/memory-cloud.git
+cd memory-cloud/memory-mcp-worker
+npm install
 npx wrangler login        # ブラウザが開くので「Allow」
-npx wrangler whoami       # アカウント名が出れば OK
 ```
 
-### 3. データベースを作る
+**データベースを作る**:
 
 ```powershell
 npx wrangler d1 create memory-mcp
-```
-
-出力に表示される `database_id` を `wrangler.jsonc` の `REPLACE_WITH_YOUR_DATABASE_ID` に貼り付けます。
-「設定ファイルに自動で追加するか」と聞かれたら **No** を選んでください（バインディング名を `DB` にするため）。
-
-```powershell
-npm run db:init           # テーブルを作成
-npx wrangler d1 execute memory-mcp --remote --command "SELECT name FROM sqlite_master WHERE type='table'"
-```
-
-`entities` / `observations` / `relations` が表示されれば OK です。
-
-続けて、OAuth 用の KV を作ります（Web 版クライアントを使わない場合も、デプロイに必要です）。
-
-```powershell
 npx wrangler kv namespace create OAUTH_KV
 ```
 
-出力に表示される `id` を `wrangler.jsonc` の `REPLACE_WITH_YOUR_KV_ID` に貼り付けます。
-設定ファイルに自動で追加するか聞かれたら **No** を選んでください（既に書いてあるため）。
-
-### 4. デプロイする
+それぞれの出力に表示される ID を、`wrangler.jsonc` の `database_id` と `id` に書き換えます
+（リポジトリに入っている値は作者の環境のものです）。「設定ファイルに自動で追加するか」と聞かれたら **No** を選びます。
 
 ```powershell
-npm test                  # （任意）ローカルテスト。Node.js 22.5 以上
-npm run test:oauth        # （任意）OAuth のローカル結合テスト。wrangler dev を起動するので 1 分ほどかかる
+npm run db:init           # テーブルを作成
+```
+
+**デプロイする**:
+
+```powershell
 npm run deploy
 ```
 
-初回は `workers.dev` のサブドメイン名を決めるよう求められます。
-最後に表示される `https://memory-mcp.<サブドメイン>.workers.dev` を控えてください。
+初回は URL の一部になる名前（サブドメイン）を決めるよう求められます。
+最後に表示される `https://memory-mcp.<サブドメイン>.workers.dev` が、記憶サーバーの URL です。
 
-### 5. トークンを設定する
+**トークンを設定する**: トークンは、記憶サーバーに接続するためのパスワードです。
 
 ```powershell
+$url = 'https://memory-mcp.<サブドメイン>.workers.dev'
 $token = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLower()
 $token | npx wrangler secret put MEMORY_TOKEN
 $token                    # 表示された値をパスワードマネージャーなどに保管
 ```
 
-パイプで渡せない場合は `npx wrangler secret put MEMORY_TOKEN` を実行し、表示されたプロンプトに貼り付けます。
+### 2. PC の AI ツールをつなぐ
 
-### 6. 動作確認
-
-```powershell
-$url = 'https://memory-mcp.<サブドメイン>.workers.dev'
-Invoke-RestMethod -Method Post -Uri "$url/mcp/global" `
-  -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' `
-  -Body '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' |
-  ForEach-Object { $_.result.tools.name }
-```
-
-8 つのツール名が表示されれば成功です。
-
----
-
-## PC ごとのセットアップ
+リポジトリの直下（`memory-cloud/`）で実行します。この PC に入っている AI ツールを自動で探して設定します。
 
 ```powershell
+cd ..
 pwsh ./client/setup-client.ps1 -Url $url -Token $token
-
-# 設定するクライアントを指定する場合（省略時はインストール済みのものを自動で検出）
-pwsh ./client/setup-client.ps1 -Url $url -Token $token -Clients claude, codex, cursor
 ```
 
-環境変数 `MEMORY_URL` / `MEMORY_TOKEN` の保存、各クライアントへの `memory-global` の登録、共通ナレッジの初期データ投入、
-各クライアントのユーザー共通ルール（`~/.claude/CLAUDE.md` など）への追記を行います。
-**終わったらターミナルと各エディターを開き直してください**（環境変数を反映するため）。
+終わったら、ターミナルとエディターを開き直してください。
+Claude Code なら `/mcp` コマンドで `memory-global` が connected になっていれば成功です。
 
-- 何度実行しても問題ありません。書き換えた設定ファイルは `<ファイル名>.bak` に元の内容が残ります
-- JSON の設定ファイルは書き直すため、ファイル内のコメントは消えます（`.bak` には残ります）
-- Claude Code 以外の設定ファイルにはトークンを書かず、環境変数 `MEMORY_TOKEN` を参照させます
-- Cursor のユーザー共通ルールはファイルに置けないため、`client/templates/user-memory-rules.md` の内容を
-  Cursor Settings > Rules の User Rules に貼り付けてください
+スクリプトが書き込むファイルや、手で設定する方法は [docs/clients.md](docs/clients.md) にあります。
 
-### 旧ローカル版（jsonl）からの移行（該当する場合のみ）
+### 3. プロジェクトに導入する
 
-```powershell
-pwsh ./client/import-jsonl.ps1 -Path "$HOME/.claude/memory/global.jsonl" -Scope global
-pwsh ./client/import-jsonl.ps1 -Path <repo>/.claude/memory/project.jsonl -Scope <略称>
-```
-
-何度実行しても重複しません。移行後、旧ファイルと旧 `scripts/setup-memory.ps1` は削除して構いません。
-`~/.claude/settings.json` に残っている read_graph の禁止設定は、そのままで問題ありません（このサーバーには read_graph がありません）。
-
----
-
-## プロジェクトへの導入（プロジェクトごとに 1 回）
-
-1. `memory-kit/` の中身をリポジトリにコピーする。必須なのは `AGENTS.md` と `scripts/`。
-   あとは使うクライアントの分だけコピーします。
-
-   | クライアント | コピーするもの |
-   |---|---|
-   | Claude Code | `CLAUDE.md`、`.mcp.json`、`.claude/agents/` |
-   | Codex CLI | `.codex/` |
-   | Gemini CLI | `.gemini/` |
-   | Cursor | `.cursor/` |
-   | VS Code | `.vscode/mcp.json` |
-
-   既に `AGENTS.md` や `CLAUDE.md` がある場合は、`AGENTS.md` の「記憶プロトコル」の節を既存の `AGENTS.md` に貼り付け、
-   `CLAUDE.md` の先頭に `@AGENTS.md` の 1 行を追加します。
-2. 実行する
+1. [`memory-kit/`](memory-kit/) の中身を、導入したいリポジトリにコピーします
+   （必須は `AGENTS.md` と `scripts/`。あとは使うツールの分だけ。詳しくは [docs/clients.md](docs/clients.md)）
+2. 導入先のリポジトリで、プロジェクトの略称（英小文字・数字・ハイフン）を決めて実行します
 
    ```powershell
    pwsh ./scripts/init-project.ps1 -Slug myapp
    ```
 
-3. コピーしたファイルを git にコミットする
+3. コピーしたファイルを git にコミットします（トークンは含まれないので安全です）
 
-記憶のルールは `AGENTS.md` にまとめてあり、Claude Code は `CLAUDE.md` の `@AGENTS.md` から読み込みます。
-ルールを変えるときは `AGENTS.md` だけを直してください。Claude Code 専用の指示（サブエージェントなど）は `CLAUDE.md` に書きます。
-
-各設定ファイルはトークンを環境変数（`MEMORY_TOKEN`）から読むので、コミットしても安全です。
-ただし `.codex/config.toml` には Worker の URL がそのまま書き込まれます（Codex は URL に環境変数を使えないため）。
-URL だけではアクセスできませんが、公開リポジトリで URL を伏せたい場合は `.codex/` をコミットせず、各自のユーザー設定に追加してください。
-
-### 新しい PC・新しい参加者
-
-`setup-client.ps1` を実行済みなら、リポジトリを clone してエージェントを起動するだけです。
-初回はプロジェクトのサーバーを使うか確認されるクライアントがあるので、許可してください。
-Codex CLI はプロジェクトを trusted にしたときだけ `.codex/config.toml` を読みます。
+ほかの PC やチームの人は、手順 2 を済ませていれば、clone するだけで同じ記憶を使えます。
 
 ---
 
-## Web 版クライアントで使う（OAuth）
+## もっと知る
 
-claude.ai のカスタムコネクタ（Web 版・デスクトップ版・モバイル版）など、固定トークンを設定できないクライアントは、
-OAuth で接続します。サインインには GitHub アカウントを使い、許可した GitHub ユーザーだけが接続できます。
-
-- 固定トークン（`MEMORY_TOKEN`）での接続はこれまでどおり使えます。Claude Code などの設定を変える必要はありません
-- 下の設定をするまで OAuth は無効で、固定トークンでしか接続できません
-
-### 1. GitHub OAuth App を作る（全体で 1 回）
-
-https://github.com/settings/applications/new で次のように登録します。
-
-| 項目 | 値 |
+| ドキュメント | 内容 |
 |---|---|
-| Application name | `memory-mcp`（任意） |
-| Homepage URL | `https://memory-mcp.<サブドメイン>.workers.dev` |
-| Authorization callback URL | `https://memory-mcp.<サブドメイン>.workers.dev/oauth/github/callback` |
-| Enable Device Flow | チェックしない |
+| [docs/memory-model.md](docs/memory-model.md) | 記憶の形、AI に渡すルール、ツールの一覧、server-memory からの移行 |
+| [docs/clients.md](docs/clients.md) | AI ツールごとの設定ファイル、手で設定する方法 |
+| [docs/operations.md](docs/operations.md) | 記憶の確認と修正、バックアップ、困ったとき、セキュリティ |
 
-登録後の画面で **Client ID** を控え、**Generate a new client secret** で Client secret を作って控えます（secret は一度しか表示されません）。
+## ディレクトリ構成
 
-### 2. Worker に設定してデプロイする
-
-```powershell
-cd memory-mcp-worker
-npx wrangler secret put GITHUB_CLIENT_ID        # Client ID を貼り付け
-npx wrangler secret put GITHUB_CLIENT_SECRET    # Client secret を貼り付け
-npx wrangler secret put ALLOWED_GITHUB_USERS    # 許可する GitHub ユーザー名（複数はカンマ区切り）
-npm run deploy
 ```
-
-`ALLOWED_GITHUB_USERS` が空だと、誰もサインインできません。
-
-### 3. claude.ai に登録する
-
-claude.ai の **設定 > コネクタ > カスタムコネクタを追加** で、使うスコープの URL を登録します。
-URL ごとに 1 つのコネクタになります。
-
-| コネクタ名（例） | URL |
-|---|---|
-| memory-global | `https://memory-mcp.<サブドメイン>.workers.dev/mcp/global` |
-| memory-myapp | `https://memory-mcp.<サブドメイン>.workers.dev/mcp/p/myapp` |
-
-「連携/接続」を押すと、memory-mcp の同意画面 → GitHub のサインインの順に進みます。
-OAuth Client ID / Secret の欄は空のままで構いません（クライアントの登録は自動で行われます）。
-
-ChatGPT など、ほかの OAuth 対応クライアントでも同じ URL で接続できます。
-
-### 仕組みとセキュリティ
-
-- 実装には Cloudflare 公式の [`@cloudflare/workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider) を使っています（OAuth 2.1 + PKCE、動的クライアント登録、MCP の認可仕様に対応）
-- `/mcp` 以下全体が 1 つのリソースです。1 回の接続で、`/mcp/global` も `/mcp/p/<略称>` も使えます
-- アクセストークンの有効期限は 1 時間で、クライアントが自動で更新します。60 日使わなければ再ログインが必要です
-- KV にはトークンのハッシュと暗号化した情報だけが入ります。GitHub のトークンは保存しません
-- 接続を止めたいとき: `ALLOWED_GITHUB_USERS` からユーザーを外すと、発行済みのトークンもすぐに使えなくなります
-  （`npx wrangler secret put ALLOWED_GITHUB_USERS` で上書き）
-
----
-
-## ほかのクライアントでの設定
-
-`setup-client.ps1` を使わずに手で設定する場合や、表にないクライアントの場合の例です。
-どれも URL は `<MEMORY_URL>/mcp/global`（共通）か `<MEMORY_URL>/mcp/p/<略称>`（プロジェクト）、
-ヘッダーは `Authorization: Bearer <MEMORY_TOKEN>` です。
-
-**Codex CLI**（`~/.codex/config.toml`）
-
-```toml
-[mcp_servers.memory-global]
-url = "https://memory-mcp.<サブドメイン>.workers.dev/mcp/global"
-bearer_token_env_var = "MEMORY_TOKEN"
+memory-mcp-worker/   Cloudflare にデプロイする記憶サーバー本体
+client/              PC ごとの接続スクリプト
+memory-kit/          プロジェクトにコピーするテンプレート
+docs/                詳しい説明
 ```
-
-**Gemini CLI**（`~/.gemini/settings.json`）
-
-```json
-{
-  "mcpServers": {
-    "memory-global": {
-      "httpUrl": "${MEMORY_URL}/mcp/global",
-      "headers": { "Authorization": "Bearer ${MEMORY_TOKEN}" }
-    }
-  }
-}
-```
-
-**Cursor**（`~/.cursor/mcp.json`）／ **Windsurf**（`~/.codeium/windsurf/mcp_config.json`、`url` を `serverUrl` にする）
-
-```json
-{
-  "mcpServers": {
-    "memory-global": {
-      "url": "${env:MEMORY_URL}/mcp/global",
-      "headers": { "Authorization": "Bearer ${env:MEMORY_TOKEN}" }
-    }
-  }
-}
-```
-
-**VS Code**（コマンドパレット「MCP: Open User Configuration」で開く `mcp.json`）
-
-```json
-{
-  "servers": {
-    "memory-global": {
-      "type": "http",
-      "url": "${env:MEMORY_URL}/mcp/global",
-      "headers": { "Authorization": "Bearer ${env:MEMORY_TOKEN}" }
-    }
-  }
-}
-```
-
-**stdio にしか対応していないクライアント**（Claude Desktop など）: mcp-remote で中継します。
-
-```json
-{
-  "mcpServers": {
-    "memory-global": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "https://memory-mcp.<サブドメイン>.workers.dev/mcp/global",
-               "--header", "Authorization:${AUTH_HEADER}"],
-      "env": { "AUTH_HEADER": "Bearer <MEMORY_TOKEN>" }
-    }
-  }
-}
-```
-
-（`Authorization:` の後ろに空白を入れないのは、Windows で引数が分割されるのを避けるためです）
-
-**ルールの設定**: 表にないクライアントは、そのクライアントのユーザー共通ルールに
-`client/templates/user-memory-rules.md` の内容を、プロジェクトのルールに `AGENTS.md` の内容を設定してください。
-
----
-
-## 運用
-
-**中身の確認や手直し**（AI のトークンを使いません）
-
-```powershell
-# プロジェクト myapp のエンティティ一覧
-npx wrangler d1 execute memory-mcp --remote --command "SELECT name, entity_type, updated_at FROM entities WHERE scope='p:myapp' ORDER BY updated_at DESC"
-
-# observation の書き換え
-npx wrangler d1 execute memory-mcp --remote --command "UPDATE observations SET content='[2026-11-15 owner] 概要: ○○' WHERE content LIKE '%概要: (1文で目的を書く)%'"
-```
-
-スコープの値は、共通が `global`、プロジェクトが `p:<略称>` です。
-
-**バックアップ**
-
-```powershell
-npm run db:export         # backup.sql に書き出し（git にはコミットしない）
-```
-
-**トークンの交換**: 手順 5 を再実行し、各 PC で `setup-client.ps1` を再実行します。
-
-**ログの確認**: `npx wrangler tail` でリクエストをリアルタイムに表示できます。
-
-## 困ったとき
-
-| 症状 | 対処 |
-|---|---|
-| `/mcp` で memory-project が failed | ターミナルを開き直して環境変数を反映。`$env:MEMORY_URL` が表示されるか確認 |
-| Cursor / VS Code / Windsurf でつながらない | エディターを完全に終了してから起動し直す（起動中のエディターには新しい環境変数が反映されない） |
-| Codex でプロジェクトの memory-project が出ない | プロジェクトを trusted にする。`.codex/config.toml` の URL が `{{MEMORY_URL}}` のままなら `init-project.ps1` を再実行 |
-| 設定ファイルを壊してしまった | `setup-client.ps1` が残した `<ファイル名>.bak` から戻す |
-| デプロイで KV のエラー | `wrangler.jsonc` の `REPLACE_WITH_YOUR_KV_ID` が置き換わっていない。初回セットアップ 3 の KV を作る |
-| claude.ai で「このアカウントは許可されていません」 | `ALLOWED_GITHUB_USERS` に GitHub のユーザー名を追加する |
-| GitHub で redirect_uri のエラー | GitHub OAuth App の callback URL が `<URL>/oauth/github/callback` になっているか確認 |
-| OAuth のエラーの詳細を見たい | `npx wrangler tail` で、拒否した理由がログに出る |
-| 401 Unauthorized | トークンの不一致。`wrangler secret put` した値と環境変数を見比べる |
-| 404 | URL の誤り。略称は英小文字・数字・ハイフンのみ |
-| D1 の上限エラー | 無料枠（1 日 読み取り 500 万行 / 書き込み 10 万行）の超過。UTC 0 時（日本時間 9 時）に回復 |
-
-## セキュリティ
-
-- `workers.dev` の URL は誰でもアクセスできます。守りはトークン（固定トークンと OAuth）だけなので、トークンは git にコミットしないでください。
-- OAuth で接続できるのは `ALLOWED_GITHUB_USERS` の GitHub ユーザーだけです。GitHub アカウントには 2 段階認証を設定してください。
-- Claude Code の `memory-global` の登録情報（トークンを含む）は各 PC の `~/.claude.json` に保存されます。
-  ほかのクライアントの設定ファイルにはトークンは入らず、ユーザー環境変数 `MEMORY_TOKEN` を参照します。

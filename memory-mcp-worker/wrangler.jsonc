@@ -1,5 +1,5 @@
 {
-	// Cloudflare Workers の設定ファイル（AWS でいう SAM テンプレートに相当）
+	// Cloudflare Workers の設定ファイル（デプロイ先・データベースなどの設定）
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "memory-mcp",
 	"main": "src/index.js",
@@ -15,14 +15,9 @@
 			"database_name": "memory-mcp",
 			// `npx wrangler d1 create memory-mcp` の出力に表示される ID を貼り付けてください
 			"database_id": "2167f88c-f53a-494d-8b1f-5555bb7c1101"
-		},
-		{
-			"binding": "memory_mcp",
-			"database_name": "memory-mcp",
-			"database_id": "2167f88c-f53a-494d-8b1f-5555bb7c1101"
 		}
 	],
-	// OAuth のトークン・クライアント情報の保存先（Web 版クライアント向け。README の「Web 版クライアントで使う」）
+	// OAuth のトークン・クライアント情報の保存先（Web 版の AI 向けのログイン機能）
 	"kv_namespaces": [
 		{
 			"binding": "OAUTH_KV",
