@@ -17,6 +17,7 @@
  *   - open_nodes は指定ノードに接続するリレーションも返します（近傍の把握用）
  */
 import { adminIdentity, bearerToken, handleAdmin, resolveAgent } from './agents.js';
+import { handleDashboard, isDashboardPath } from './dashboard.js';
 
 const SERVER_INFO = { name: 'memory-mcp', version: '1.2.0' };
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
@@ -279,6 +280,9 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === '/' || url.pathname === '') return rootResponse();
+
+    // Web の確認画面（ログインは dashboard.js が管理者トークンで行う）
+    if (isDashboardPath(url.pathname)) return handleDashboard(request, env);
 
     if (url.pathname.startsWith('/admin/')) {
       if (!isAuthorized(request, env)) return jsonResponse({ error: 'unauthorized' }, 401);

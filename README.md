@@ -30,6 +30,7 @@ AI:     （記憶に追記）「ヘッダーの前後の空白で認証が失敗
   Claude Code / Codex CLI / Gemini CLI / Cursor / VS Code（Copilot）/ Windsurf などから使えます
 - **プロジェクトごとに分けられる**: 全プロジェクト共通の記憶と、プロジェクトごとの記憶を分けて持てます
 - **誰が書いたかわかる**: AI ツールごとにトークンを分けるので、どの AI が書いた記憶かをサーバーが記録します。AI に好きな呼び名も付けられます
+- **ブラウザで見られる**: AI どうしのやり取りやタスクの進み具合を、Web の確認画面（`/dashboard`）で見られます
 - **複数の AI で分担できる**: タスクボードと受信箱で、Claude Code と Codex などが同じプロジェクトの作業を取り合わずに分担し、引き継ぎやレビュー依頼ができます
 - **AI の利用量を抑える作り**: 記憶を全部読み込むことはせず、必要なものだけを検索して読みます
 - **無料で動く**: Cloudflare の無料プランの範囲で動きます。クレジットカードの登録も不要です
@@ -178,6 +179,7 @@ macOS で Cursor や VS Code が環境変数を読めない場合は、ターミ
 | [docs/clients.md](docs/clients.md) | AI ツールごとの設定ファイル、手で設定する方法 |
 | [docs/agents.md](docs/agents.md) | エージェントの識別（AI ツールごとのトークン、書き手の記録） |
 | [docs/coordination.md](docs/coordination.md) | 複数の AI での分担（タスクボード、受信箱、引き継ぎ） |
+| [docs/dashboard.md](docs/dashboard.md) | Web の確認画面（タスク・メッセージ・記憶の書き手をブラウザで見る） |
 | [docs/operations.md](docs/operations.md) | 記憶の確認と修正、新しい版への更新、バックアップ、困ったとき、セキュリティ |
 
 ## ディレクトリ構成

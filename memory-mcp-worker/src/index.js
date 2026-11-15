@@ -29,6 +29,9 @@ export default {
     // 管理用（エージェントの発行・失効）。管理者トークンだけ
     if (url.pathname.startsWith('/admin/')) return tokenOnlyWorker.fetch(request, env);
 
+    // Web の確認画面。OAuth を通さず、管理者トークンでログインする（dashboard.js）
+    if (url.pathname === '/dashboard' || url.pathname.startsWith('/dashboard/')) return tokenOnlyWorker.fetch(request, env);
+
     // 1. 管理者トークン・エージェントのトークン
     if (isUnderMcpRoute(url.pathname)) {
       const identity = await resolveTokenIdentity(request, env);

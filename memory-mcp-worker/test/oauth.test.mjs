@@ -349,6 +349,24 @@ try {
     assert.equal((await callTool(tokens.access_token, 'send_message', { to: 'テスト係', body: 'hi' })).to, 'codex-test');
   });
 
+  await test('確認画面は OAuth を通らず、管理者トークンでログインして見られる（workerd 上）', async () => {
+    const page = await fetch(`${ORIGIN}/dashboard`, { redirect: 'manual' });
+    assert.equal(page.status, 200);
+    const login = await fetch(`${ORIGIN}/dashboard/login`, {
+      method: 'POST', redirect: 'manual',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: ORIGIN },
+      body: new URLSearchParams({ token: LEGACY_TOKEN }),
+    });
+    assert.equal(login.status, 303);
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    for (const p of ['/dashboard', '/dashboard/agents', '/dashboard/tasks?scope=p:demo', '/dashboard/messages?scope=p:demo', '/dashboard/memory?scope=global']) {
+      const r = await fetch(`${ORIGIN}${p}`, { headers: { Cookie: cookie }, redirect: 'manual' });
+      assert.equal(r.status, 200, p);
+    }
+    const tasks = await (await fetch(`${ORIGIN}/dashboard/tasks?scope=p:demo`, { headers: { Cookie: cookie } })).text();
+    assert.ok(tasks.includes('実 D1 での確認'));
+  });
+
   await test('リフレッシュトークンで更新できる', async () => {
     const r = await token({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: clientId });
     assert.equal(r.status, 200, JSON.stringify(r.body));
