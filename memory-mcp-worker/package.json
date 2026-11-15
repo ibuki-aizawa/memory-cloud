@@ -1,0 +1,11 @@
+{
+  "name": "memory-mcp-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute memory-mcp --remote --file=schema.sql",
+    "db:export": "wrangler d1 export memory-mcp --remote --output=backup.sql",
+    "test": "node --experimental-sqlite --no-warnings test/test.mjs"
+  }
+}
