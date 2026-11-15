@@ -18,7 +18,7 @@
  */
 import { adminIdentity, bearerToken, handleAdmin, resolveAgent } from './agents.js';
 
-const SERVER_INFO = { name: 'memory-mcp', version: '1.1.0' };
+const SERVER_INFO = { name: 'memory-mcp', version: '1.2.0' };
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 
 const MAX_ITEMS = 20;          // 1 回のツール呼び出しで扱う最大件数
@@ -27,6 +27,14 @@ const MAX_CONTENT_LENGTH = 2000;
 const SEARCH_LIMIT = 10;
 const SEARCH_PREVIEW = 3;
 const NEIGHBOR_LIMIT = 50;
+
+const TASK_STATUSES = ['open', 'in_progress', 'review', 'done', 'cancelled'];
+const ACTIVE_STATUSES = ['open', 'in_progress', 'review'];
+const LEASE_MINUTES = 30;         // task_claim / task_update で延びる担当の期限
+const HANDOFF_LEASE_HOURS = 24;   // task_handoff で渡された側の期限
+const TASK_LIST_LIMIT = 50;
+const INBOX_LIMIT = 20;
+const MAX_AGENT_NAME = 100;
 
 // ---------------------------------------------------------------------------
 // ツール定義
@@ -156,8 +164,94 @@ const TOOLS = [
   },
   {
     name: 'whoami',
-    description: 'このサーバーが認識している自分（接続しているエージェント）の名前と種類を返します。observation の書き手にはこの名前を使ってください。',
+    description: 'このサーバーが認識している自分（接続しているエージェント）の名前と種類、未読メッセージ数、自分が担当中のタスク数を返します。observation の書き手にはこの名前を使ってください。',
     inputSchema: { type: 'object', properties: {} },
+  },
+
+  // --- 協調（タスクボードと受信箱）。タスクとメッセージはスコープ（プロジェクト）ごと ---
+  {
+    name: 'task_create',
+    description: 'タスクを作ります。claim: true なら作ると同時に自分が引き受けます。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: `タスク名（${MAX_NAME_LENGTH} 文字以内）` },
+        description: { type: 'string', description: '内容・完了条件など' },
+        claim: { type: 'boolean', description: 'true なら自分が引き受ける' },
+      },
+      required: ['title'],
+    },
+  },
+  {
+    name: 'task_list',
+    description: `タスクの一覧を返します（新しい順に最大 ${TASK_LIST_LIMIT} 件、説明文は含まない）。既定は終わっていないもの（open / in_progress / review）。`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['active', ...TASK_STATUSES, 'all'], description: '絞り込み。既定は active（終わっていないもの）' },
+        mine: { type: 'boolean', description: 'true なら自分が担当しているものだけ' },
+      },
+    },
+  },
+  {
+    name: 'task_get',
+    description: 'タスクの詳細と経過（引き受け・進捗メモ・引き継ぎの履歴）を返します。',
+    inputSchema: { type: 'object', properties: { id: { type: 'integer' } }, required: ['id'] },
+  },
+  {
+    name: 'task_claim',
+    description: `タスクを引き受けます。ほかのエージェントが担当中なら失敗します（同時に引き受けても成功するのは 1 人だけ）。担当には期限（${LEASE_MINUTES} 分）があり、task_update で延びます。期限が切れたタスクは別のエージェントが引き受けられます。`,
+    inputSchema: { type: 'object', properties: { id: { type: 'integer' } }, required: ['id'] },
+  },
+  {
+    name: 'task_update',
+    description: `進捗を記録します。status を変えられるのは担当者だけ（open にすると担当を外して手放す）。note だけなら誰でも書けます。担当者が呼ぶと期限が ${LEASE_MINUTES} 分延びます。`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'integer' },
+        status: { type: 'string', enum: TASK_STATUSES },
+        note: { type: 'string', description: '進捗・結果のメモ（1〜数文）' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'task_handoff',
+    description: `タスクをほかのエージェントに渡し、相手の受信箱に知らせます。レビューを頼むときは status: "review"。渡した相手の担当期限は ${HANDOFF_LEASE_HOURS} 時間です。`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'integer' },
+        to: { type: 'string', description: '渡す相手のエージェント名' },
+        note: { type: 'string', description: '引き継ぐ内容（やったこと・残り・ブランチ名など）' },
+        status: { type: 'string', enum: ['in_progress', 'review'], description: '既定は in_progress' },
+      },
+      required: ['id', 'to', 'note'],
+    },
+  },
+  {
+    name: 'send_message',
+    description: 'ほかのエージェントの受信箱にメッセージを送ります。相手は read_inbox で読みます（すぐには届かず、相手が確認したときに読まれます）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: '相手のエージェント名' },
+        body: { type: 'string' },
+        taskId: { type: 'integer', description: '関係するタスクの id' },
+      },
+      required: ['to', 'body'],
+    },
+  },
+  {
+    name: 'read_inbox',
+    description: `自分宛てのメッセージを古い順に返し（最大 ${INBOX_LIMIT} 件）、既読にします。`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        includeRead: { type: 'boolean', description: 'true なら既読のものも新しい順に返す' },
+      },
+    },
   },
 ];
 
@@ -311,13 +405,248 @@ async function callTool(name, args, ctx) {
 // ---------------------------------------------------------------------------
 
 const HANDLERS = {
-  async whoami(_args, { identity, scope }) {
+  async whoami(_args, { db, identity, scope }) {
     const hints = {
       admin: '管理者トークン（MEMORY_TOKEN）で接続しています。エージェントごとにトークンを分けると、書き手を区別できます。',
       agent: 'エージェント専用のトークンで接続しています。',
       user: 'OAuth でログインして接続しています。',
     };
-    return { name: identity.name, kind: identity.kind, scope, hint: hints[identity.kind] };
+    const counts = await db
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM messages WHERE scope = ?1 AND to_agent = ?2 AND read_at IS NULL) AS unread,
+           (SELECT COUNT(*) FROM tasks WHERE scope = ?1 AND assignee = ?2 AND status IN ('in_progress', 'review')) AS mine`
+      )
+      .bind(scope, identity.name)
+      .first();
+    return {
+      name: identity.name,
+      kind: identity.kind,
+      scope,
+      unreadMessages: counts.unread,
+      myActiveTasks: counts.mine,
+      hint: hints[identity.kind],
+    };
+  },
+
+  // --- 協調 -----------------------------------------------------------------
+
+  async task_create(args, { db, scope, author }) {
+    const title = str(args.title, 'title', MAX_NAME_LENGTH);
+    const description = optionalStr(args.description, 'description', MAX_CONTENT_LENGTH);
+    const claim = args.claim === true;
+    const row = await db
+      .prepare(
+        `INSERT INTO tasks (scope, title, description, status, assignee, lease_expires_at, created_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ${claim ? `datetime('now', '+${LEASE_MINUTES} minutes')` : 'NULL'}, ?6)
+         RETURNING id`
+      )
+      .bind(scope, title, description, claim ? 'in_progress' : 'open', claim ? author : null, author)
+      .first();
+    await addEvent(db, row.id, author, 'created', claim ? 'in_progress' : 'open', null);
+    if (claim) await addEvent(db, row.id, author, 'claimed', 'in_progress', null);
+    return { task: await getTask(db, scope, row.id) };
+  },
+
+  async task_list(args, { db, scope, author }) {
+    const status = args.status === undefined ? 'active' : args.status;
+    let statuses;
+    if (status === 'active') statuses = ACTIVE_STATUSES;
+    else if (status === 'all') statuses = TASK_STATUSES;
+    else if (TASK_STATUSES.includes(status)) statuses = [status];
+    else throw new ToolInputError(`status は active / ${TASK_STATUSES.join(' / ')} / all のどれかにしてください`);
+    const mine = args.mine === true;
+
+    const { results } = await db
+      .prepare(
+        `SELECT ${TASK_COLUMNS} FROM tasks
+         WHERE scope = ?1 AND status IN (SELECT value FROM json_each(?2))
+           ${mine ? 'AND assignee = ?3' : ''}
+         ORDER BY updated_at DESC, id DESC
+         LIMIT ${TASK_LIST_LIMIT + 1}`
+      )
+      .bind(...(mine ? [scope, JSON.stringify(statuses), author] : [scope, JSON.stringify(statuses)]))
+      .all();
+    const out = { tasks: results.slice(0, TASK_LIST_LIMIT).map((r) => taskView(r, false)) };
+    if (results.length > TASK_LIST_LIMIT) out.more = true;
+    return out;
+  },
+
+  async task_get(args, { db, scope }) {
+    const id = taskId(args.id);
+    const task = await getTask(db, scope, id, true);
+    if (!task) throw new ToolInputError(`タスク ${id} はありません`);
+    const { results } = await db
+      .prepare('SELECT actor, kind, status, note, created_at AS createdAt FROM task_events WHERE task_id = ?1 ORDER BY id')
+      .bind(id)
+      .all();
+    return { task, events: results };
+  },
+
+  async task_claim(args, { db, scope, author }) {
+    const id = taskId(args.id);
+    // 条件付きの UPDATE 1 文で引き受ける。同時に呼ばれても成功するのは 1 人だけ
+    const res = await db
+      .prepare(
+        `UPDATE tasks
+         SET assignee = ?3,
+             status = CASE WHEN status = 'review' THEN 'review' ELSE 'in_progress' END,
+             lease_expires_at = datetime('now', '+${LEASE_MINUTES} minutes'),
+             updated_at = datetime('now')
+         WHERE id = ?1 AND scope = ?2
+           AND status IN ('open', 'in_progress', 'review')
+           AND (assignee IS NULL OR assignee = ?3 OR lease_expires_at IS NULL OR lease_expires_at <= datetime('now'))`
+      )
+      .bind(id, scope, author)
+      .run();
+    const task = await getTask(db, scope, id);
+    if (!task) throw new ToolInputError(`タスク ${id} はありません`);
+    if (!changes(res)) {
+      if (!ACTIVE_STATUSES.includes(task.status)) {
+        return { claimed: false, task, reason: `このタスクは ${task.status} です` };
+      }
+      return { claimed: false, task, reason: `${task.assignee} が担当中です（期限 ${task.leaseExpiresAt} UTC）。別のタスクを選ぶか、send_message で相談してください` };
+    }
+    await addEvent(db, id, author, 'claimed', task.status, null);
+    return { claimed: true, task };
+  },
+
+  async task_update(args, { db, scope, author, identity }) {
+    const id = taskId(args.id);
+    const status = args.status === undefined ? null : args.status;
+    if (status !== null && !TASK_STATUSES.includes(status)) {
+      throw new ToolInputError(`status は ${TASK_STATUSES.join(' / ')} のどれかにしてください`);
+    }
+    const note = optionalStr(args.note, 'note', MAX_CONTENT_LENGTH);
+    if (status === null && note === null) throw new ToolInputError('status か note を指定してください');
+
+    const current = await getTask(db, scope, id);
+    if (!current) throw new ToolInputError(`タスク ${id} はありません`);
+    const mineNow = current.assignee === author;
+    const heldByOther = current.assignee && !mineNow && !current.expired && ACTIVE_STATUSES.includes(current.status);
+
+    if (status === null) {
+      // メモだけ。担当者なら期限を延ばす
+      if (mineNow && ACTIVE_STATUSES.includes(current.status)) {
+        await db
+          .prepare(`UPDATE tasks SET lease_expires_at = datetime('now', '+${LEASE_MINUTES} minutes'), updated_at = datetime('now') WHERE id = ?1`)
+          .bind(id)
+          .run();
+      } else {
+        await db.prepare(`UPDATE tasks SET updated_at = datetime('now') WHERE id = ?1`).bind(id).run();
+      }
+      await addEvent(db, id, author, 'updated', current.status, note);
+      return { task: await getTask(db, scope, id) };
+    }
+
+    if (heldByOther && identity.kind !== 'admin') {
+      throw new ToolInputError(`${current.assignee} が担当中なので status は変えられません。note だけ書くか、send_message で相談してください`);
+    }
+
+    let assignee;
+    let lease;
+    if (status === 'open') {
+      assignee = null; // 手放す
+      lease = 'NULL';
+    } else if (status === 'in_progress' || status === 'review') {
+      assignee = heldByOther ? current.assignee : author;
+      lease = `datetime('now', '+${LEASE_MINUTES} minutes')`;
+    } else {
+      assignee = current.assignee || author; // done / cancelled は誰が終えたかを残す
+      lease = 'NULL';
+    }
+
+    // 読んでから書くまでに担当が変わっていたら失敗させる（楽観的排他）
+    const res = await db
+      .prepare(
+        `UPDATE tasks SET status = ?3, assignee = ?4, lease_expires_at = ${lease}, updated_at = datetime('now')
+         WHERE id = ?1 AND scope = ?2 AND assignee IS ?5 AND lease_expires_at IS ?6`
+      )
+      .bind(id, scope, status, assignee, current.assignee, current.leaseExpiresAt ?? null)
+      .run();
+    if (!changes(res)) throw new ToolInputError('ほかのエージェントが同時に更新しました。task_get で確認してからやり直してください');
+    await addEvent(db, id, author, status === 'open' ? 'released' : 'updated', status, note);
+    return { task: await getTask(db, scope, id) };
+  },
+
+  async task_handoff(args, { db, scope, author, identity }) {
+    const id = taskId(args.id);
+    const to = await agentName(db, args.to, 'to');
+    const note = str(args.note, 'note', MAX_CONTENT_LENGTH);
+    const status = args.status === undefined ? 'in_progress' : args.status;
+    if (!['in_progress', 'review'].includes(status)) throw new ToolInputError('status は in_progress か review にしてください');
+
+    const current = await getTask(db, scope, id);
+    if (!current) throw new ToolInputError(`タスク ${id} はありません`);
+    if (!ACTIVE_STATUSES.includes(current.status)) throw new ToolInputError(`このタスクは ${current.status} です`);
+    const heldByOther = current.assignee && current.assignee !== author && !current.expired;
+    if (heldByOther && identity.kind !== 'admin') {
+      throw new ToolInputError(`${current.assignee} が担当中なので渡せません`);
+    }
+
+    const res = await db
+      .prepare(
+        `UPDATE tasks SET status = ?3, assignee = ?4,
+           lease_expires_at = datetime('now', '+${HANDOFF_LEASE_HOURS} hours'), updated_at = datetime('now')
+         WHERE id = ?1 AND scope = ?2 AND assignee IS ?5 AND lease_expires_at IS ?6`
+      )
+      .bind(id, scope, status, to, current.assignee, current.leaseExpiresAt ?? null)
+      .run();
+    if (!changes(res)) throw new ToolInputError('ほかのエージェントが同時に更新しました。task_get で確認してからやり直してください');
+
+    await db.batch([
+      eventStmt(db, id, author, 'handoff', status, `→ ${to}: ${note}`),
+      db.prepare('INSERT INTO messages (scope, to_agent, from_agent, body, task_id) VALUES (?1, ?2, ?3, ?4, ?5)')
+        .bind(scope, to, author, `タスク #${id}「${current.title}」を${status === 'review' ? 'レビュー依頼として' : ''}引き継ぎました: ${note}`, id),
+    ]);
+    return { task: await getTask(db, scope, id), notified: to };
+  },
+
+  async send_message(args, { db, scope, author }) {
+    const to = await agentName(db, args.to, 'to');
+    const body = str(args.body, 'body', MAX_CONTENT_LENGTH);
+    let task = null;
+    if (args.taskId !== undefined && args.taskId !== null) {
+      task = taskId(args.taskId, 'taskId');
+      if (!(await getTask(db, scope, task))) throw new ToolInputError(`タスク ${task} はありません`);
+    }
+    const row = await db
+      .prepare('INSERT INTO messages (scope, to_agent, from_agent, body, task_id) VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id')
+      .bind(scope, to, author, body, task)
+      .first();
+    return { sent: true, id: row.id, to };
+  },
+
+  async read_inbox(args, { db, scope, author }) {
+    const includeRead = args.includeRead === true;
+    const { results } = await db
+      .prepare(
+        `SELECT id, from_agent AS "from", body, task_id AS taskId, created_at AS createdAt, read_at AS readAt
+         FROM messages
+         WHERE scope = ?1 AND to_agent = ?2 ${includeRead ? '' : 'AND read_at IS NULL'}
+         ORDER BY id ${includeRead ? 'DESC' : 'ASC'}
+         LIMIT ${INBOX_LIMIT + 1}`
+      )
+      .bind(scope, author)
+      .all();
+    const messages = results.slice(0, INBOX_LIMIT);
+    const unreadIds = messages.filter((m) => !m.readAt).map((m) => m.id);
+    if (unreadIds.length) {
+      await db
+        .prepare(`UPDATE messages SET read_at = datetime('now') WHERE id IN (SELECT value FROM json_each(?1))`)
+        .bind(JSON.stringify(unreadIds))
+        .run();
+    }
+    const out = {
+      messages: messages.map((m) => {
+        const item = { id: m.id, from: m.from, body: m.body, createdAt: m.createdAt };
+        if (m.taskId !== null) item.taskId = m.taskId;
+        if (includeRead) item.read = !!m.readAt;
+        return item;
+      }),
+    };
+    if (results.length > INBOX_LIMIT) out.more = true;
+    return out;
   },
 
   async create_entities(args, { db, scope, author }) {
@@ -597,6 +926,53 @@ async function observationsFor(db, ids) {
   return map;
 }
 
+const TASK_COLUMNS = `id, title, description, status, assignee, lease_expires_at, created_by, created_at, updated_at,
+  (lease_expires_at IS NOT NULL AND lease_expires_at <= datetime('now')) AS expired`;
+
+async function getTask(db, scope, id, withDescription = true) {
+  const row = await db
+    .prepare(`SELECT ${TASK_COLUMNS} FROM tasks WHERE id = ?1 AND scope = ?2`)
+    .bind(id, scope)
+    .first();
+  return row ? taskView(row, withDescription) : null;
+}
+
+function taskView(r, withDescription) {
+  const t = { id: r.id, title: r.title, status: r.status, assignee: r.assignee };
+  if (withDescription && r.description) t.description = r.description;
+  if (r.lease_expires_at) t.leaseExpiresAt = r.lease_expires_at;
+  t.expired = !!r.expired && ACTIVE_STATUSES.includes(r.status);
+  t.createdBy = r.created_by;
+  t.updatedAt = r.updated_at;
+  return t;
+}
+
+function eventStmt(db, id, actor, kind, status, note) {
+  return db
+    .prepare('INSERT INTO task_events (task_id, actor, kind, status, note) VALUES (?1, ?2, ?3, ?4, ?5)')
+    .bind(id, actor, kind, status, note);
+}
+
+async function addEvent(db, id, actor, kind, status, note) {
+  await eventStmt(db, id, actor, kind, status, note).run();
+}
+
+/** 宛先のエージェント名。発行済みのエージェント・owner・github:<名前> だけを受け付ける（打ち間違いで届かないのを防ぐ） */
+async function agentName(db, value, field) {
+  const name = str(value, field, MAX_AGENT_NAME);
+  if (name === 'owner' || /^github:[A-Za-z0-9-]+$/.test(name)) return name;
+  const row = await db.prepare('SELECT name FROM agents WHERE name = ?1 AND revoked_at IS NULL').bind(name).first();
+  if (row) return name;
+  const { results } = await db.prepare('SELECT name FROM agents WHERE revoked_at IS NULL ORDER BY name').all();
+  throw new ToolInputError(`${field}: エージェント ${name} は登録されていません。登録済み: ${['owner', ...results.map((r) => r.name)].join(', ')}`);
+}
+
+function taskId(value, field = 'id') {
+  const n = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+  if (!Number.isInteger(n) || n <= 0) throw new ToolInputError(`${field} はタスクの番号（正の整数）で指定してください`);
+  return n;
+}
+
 function changes(res) {
   return (res && res.meta && res.meta.changes) || 0;
 }
@@ -618,6 +994,11 @@ function str(value, field, max) {
   const v = value.trim();
   if (v.length > max) throw new ToolInputError(`${field} は ${max} 文字以内にしてください`);
   return v;
+}
+
+function optionalStr(value, field, max) {
+  if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) return null;
+  return str(value, field, max);
 }
 
 function strings(value, field) {

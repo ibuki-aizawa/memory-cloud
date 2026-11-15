@@ -53,6 +53,7 @@ AI には「いつ・何を・どう書くか」のルールを渡します。�
 | `create_relations` | リレーションを作る |
 | `delete_entities` / `delete_observations` / `delete_relations` | 削除する |
 | `whoami` | 自分（接続しているエージェント）の名前を確認する（[エージェントの識別](agents.md)） |
+| `task_*` / `send_message` / `read_inbox` | 複数の AI での分担（[協調](coordination.md)） |
 
 server-memory との違い:
 - 記憶を全部読み込む `read_graph` はありません（記憶が増えると AI の利用量が膨らむため）

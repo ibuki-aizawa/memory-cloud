@@ -70,7 +70,7 @@ npm run test:oauth        # OAuth のテスト。ローカルでサーバーを�
 | 設定ファイルを壊してしまった | スクリプトが残した `<ファイル名>.bak` から戻す |
 | デプロイで D1 や KV のエラー | `wrangler.jsonc` の `database_id` / `id` が自分の値になっているか確認（README の「1. サーバーを用意する」） |
 | 401 Unauthorized | トークンの不一致か失効。管理者トークンなら `wrangler secret put` した値と見比べ、エージェントのトークンなら `agent-token.ps1 list` で有効か確認する |
-| `no such column: created_by` などのエラー | データベースの変更が未適用。`npm run db:migrate` を実行する |
+| `no such column: created_by`、`no such table: tasks` などのエラー | データベースの変更が未適用。`npm run db:migrate` を実行する |
 | 404 | URL の誤り。`/mcp/global` か `/mcp/p/<略称>` か確認する。略称は英小文字・数字・ハイフンのみ |
 | D1 の上限エラー | 無料枠（1 日 読み取り 500 万行 / 書き込み 10 万行）の超過。UTC 0 時（日本時間 9 時）に回復 |
 

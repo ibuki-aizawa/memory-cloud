@@ -238,4 +238,132 @@ await test('mca_ で始まる偽のトークンは 401', async () => {
   assert.equal((await post(P, {}, 'mca_' + '0'.repeat(64))).status, 401);
 });
 
+// --- 協調（タスクボードと受信箱） --------------------------------------------
+
+let claudeTok;
+let codexTok;
+async function tool(token, name, args, path = P) {
+  const { status, body } = await post(path, { jsonrpc: '2.0', id: nextId++, method: 'tools/call', params: { name, arguments: args } }, token);
+  assert.equal(status, 200);
+  const r = body.result;
+  return r.isError ? { error: r.content[0].text } : JSON.parse(r.content[0].text);
+}
+
+await test('タスクを作って一覧できる（説明文は一覧に出ない）', async () => {
+  claudeTok = (await admin('POST', '/admin/agents', { name: 'claude-a' })).body.token;
+  codexTok = (await admin('POST', '/admin/agents', { name: 'codex-b' })).body.token;
+  const t = await tool(claudeTok, 'task_create', { title: 'ログイン画面を作る', description: '完了条件: テストが通る' });
+  assert.equal(t.task.status, 'open');
+  assert.equal(t.task.assignee, null);
+  assert.equal(t.task.createdBy, 'claude-a');
+  assert.equal(t.task.description, '完了条件: テストが通る');
+  const list = await tool(codexTok, 'task_list', {});
+  assert.equal(list.tasks.length, 1);
+  assert.equal(list.tasks[0].description, undefined);
+  assert.equal((await tool(codexTok, 'task_list', {}, G)).tasks.length, 0, 'タスクはスコープごと');
+});
+
+await test('task_claim は 1 人だけが成功する（同時に呼んでも）', async () => {
+  const { task } = await tool(claudeTok, 'task_create', { title: '同時に取り合うタスク' });
+  const [a, b] = await Promise.all([
+    tool(claudeTok, 'task_claim', { id: task.id }),
+    tool(codexTok, 'task_claim', { id: task.id }),
+  ]);
+  assert.equal([a.claimed, b.claimed].filter(Boolean).length, 1);
+  const loser = a.claimed ? b : a;
+  assert.ok(loser.reason.includes('担当中'));
+  const winner = a.claimed ? 'claude-a' : 'codex-b';
+  const mine = await tool(a.claimed ? claudeTok : codexTok, 'task_list', { mine: true });
+  assert.deepEqual(mine.tasks.map((t) => t.id), [task.id]);
+  assert.equal(mine.tasks[0].assignee, winner);
+  assert.equal(mine.tasks[0].status, 'in_progress');
+});
+
+await test('担当者以外は status を変えられない（note は書ける）。期限が切れたら引き受けられる', async () => {
+  const { task } = await tool(claudeTok, 'task_create', { title: 'API を直す', claim: true });
+  assert.equal(task.assignee, 'claude-a');
+  assert.ok(task.leaseExpiresAt);
+  const denied = await tool(codexTok, 'task_update', { id: task.id, status: 'done' });
+  assert.ok(denied.error.includes('担当中'));
+  const noted = await tool(codexTok, 'task_update', { id: task.id, note: 'テストが 1 件落ちていました' });
+  assert.equal(noted.task.assignee, 'claude-a');
+  assert.equal((await tool(codexTok, 'task_claim', { id: task.id })).claimed, false);
+
+  // 期限切れにする
+  env.DB.db.prepare("UPDATE tasks SET lease_expires_at = datetime('now', '-1 minutes') WHERE id = ?").run(task.id);
+  const listed = await tool(codexTok, 'task_list', {});
+  assert.equal(listed.tasks.find((t) => t.id === task.id).expired, true);
+  const taken = await tool(codexTok, 'task_claim', { id: task.id });
+  assert.equal(taken.claimed, true);
+  assert.equal(taken.task.assignee, 'codex-b');
+  assert.equal(taken.task.expired, false);
+});
+
+await test('task_update で完了・手放す。経過は task_get で読める', async () => {
+  const { task } = await tool(codexTok, 'task_create', { title: 'README を直す', claim: true });
+  const released = await tool(codexTok, 'task_update', { id: task.id, status: 'open', note: '手が回らないので戻します' });
+  assert.equal(released.task.assignee, null);
+  assert.equal(released.task.status, 'open');
+  assert.equal((await tool(claudeTok, 'task_claim', { id: task.id })).claimed, true);
+  const done = await tool(claudeTok, 'task_update', { id: task.id, status: 'done', note: '直しました' });
+  assert.equal(done.task.status, 'done');
+  assert.equal(done.task.assignee, 'claude-a');
+  assert.equal(done.task.leaseExpiresAt, undefined);
+  assert.equal((await tool(codexTok, 'task_claim', { id: task.id })).claimed, false, '終わったタスクは引き受けられない');
+  assert.ok(!(await tool(codexTok, 'task_list', {})).tasks.some((t) => t.id === task.id), '既定の一覧に done は出ない');
+  assert.ok((await tool(codexTok, 'task_list', { status: 'done' })).tasks.some((t) => t.id === task.id));
+
+  const detail = await tool(codexTok, 'task_get', { id: task.id });
+  assert.deepEqual(detail.events.map((e) => `${e.actor}:${e.kind}`), [
+    'codex-b:created', 'codex-b:claimed', 'codex-b:released', 'claude-a:claimed', 'claude-a:updated',
+  ]);
+  assert.equal(detail.events.at(-1).note, '直しました');
+});
+
+await test('task_handoff でレビューを頼むと相手の受信箱に届き、相手が引き受けられる', async () => {
+  const { task } = await tool(claudeTok, 'task_create', { title: '検索を速くする', claim: true });
+  const h = await tool(claudeTok, 'task_handoff', { id: task.id, to: 'codex-b', note: 'ブランチ claude/search を見てください', status: 'review' });
+  assert.equal(h.task.assignee, 'codex-b');
+  assert.equal(h.task.status, 'review');
+
+  const me = await tool(codexTok, 'whoami', {});
+  assert.equal(me.unreadMessages, 1);
+  assert.ok(me.myActiveTasks >= 1);
+  const inbox = await tool(codexTok, 'read_inbox', {});
+  assert.equal(inbox.messages.length, 1);
+  assert.equal(inbox.messages[0].from, 'claude-a');
+  assert.equal(inbox.messages[0].taskId, task.id);
+  assert.ok(inbox.messages[0].body.includes('claude/search'));
+  assert.equal((await tool(codexTok, 'read_inbox', {})).messages.length, 0, '読んだら既読');
+  assert.equal((await tool(codexTok, 'read_inbox', { includeRead: true })).messages[0].read, true);
+
+  const again = await tool(claudeTok, 'task_handoff', { id: task.id, to: 'claude-a', note: '戻して' });
+  assert.ok(again.error.includes('担当中'), '渡したあとは元の担当者は操作できない');
+  const claimed = await tool(codexTok, 'task_claim', { id: task.id });
+  assert.equal(claimed.task.status, 'review', 'レビュー中のまま');
+  const ok = await tool(codexTok, 'task_update', { id: task.id, status: 'done', note: 'LGTM' });
+  assert.equal(ok.task.status, 'done');
+});
+
+await test('send_message: 登録されていない宛先は拒否、受信箱はスコープごと', async () => {
+  const bad = await tool(claudeTok, 'send_message', { to: 'codx-b', body: 'hi' });
+  assert.ok(bad.error.includes('登録されていません'));
+  assert.ok(bad.error.includes('codex-b'), '登録済みの名前を示す');
+  assert.equal((await tool(claudeTok, 'send_message', { to: 'codex-b', body: '全体の連絡' }, G)).sent, true);
+  assert.equal((await tool(claudeTok, 'send_message', { to: 'owner', body: '確認お願いします' })).sent, true);
+  assert.equal((await tool(codexTok, 'read_inbox', {})).messages.length, 0, 'myapp の受信箱には来ない');
+  assert.equal((await tool(codexTok, 'read_inbox', {}, G)).messages[0].body, '全体の連絡');
+  assert.equal((await tool('test-token', 'read_inbox', {})).messages[0].from, 'claude-a');
+  assert.ok((await tool(claudeTok, 'send_message', { to: 'codex-b', body: 'x', taskId: 9999 })).error);
+});
+
+await test('協調ツールの入力エラー', async () => {
+  assert.ok((await tool(claudeTok, 'task_create', { title: ' ' })).error);
+  assert.ok((await tool(claudeTok, 'task_claim', { id: 'abc' })).error);
+  assert.ok((await tool(claudeTok, 'task_claim', { id: 9999 })).error);
+  assert.ok((await tool(claudeTok, 'task_update', { id: 1 })).error, 'status も note もない');
+  assert.ok((await tool(claudeTok, 'task_update', { id: 1, status: 'wip' })).error);
+  assert.ok((await tool(claudeTok, 'task_list', { status: 'wip' })).error);
+});
+
 console.log(`\n${passed} 件のテストに成功しました`);

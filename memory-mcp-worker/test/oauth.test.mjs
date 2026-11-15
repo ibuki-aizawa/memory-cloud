@@ -312,6 +312,28 @@ try {
     assert.equal(JSON.parse((await res.json()).result.content[0].text).name, 'codex-test');
     const denied = await fetch(`${ORIGIN}/admin/agents`, { headers: { Authorization: `Bearer ${tokens.access_token}` } });
     assert.equal(denied.status, 401, 'OAuth のトークンでは管理できない');
+
+    // 実際の D1（workerd）でもタスクの作成・引き受け・引き継ぎが動く
+    const callTool = async (tok, name, args) => {
+      const r = await fetch(`${ORIGIN}/mcp/p/demo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }),
+      });
+      const result = (await r.json()).result;
+      assert.ok(!result.isError, result.content[0].text);
+      return JSON.parse(result.content[0].text);
+    };
+    const { task } = await callTool(agentToken, 'task_create', { title: '実 D1 での確認' });
+    const [a, b] = await Promise.all([
+      callTool(agentToken, 'task_claim', { id: task.id }),
+      callTool(tokens.access_token, 'task_claim', { id: task.id }),
+    ]);
+    assert.equal([a.claimed, b.claimed].filter(Boolean).length, 1, '同時に引き受けても 1 人だけ');
+    const holder = a.claimed ? agentToken : tokens.access_token;
+    await callTool(holder, 'task_handoff', { id: task.id, to: 'codex-test', note: 'レビューお願いします', status: 'review' });
+    const inbox = await callTool(agentToken, 'read_inbox', {});
+    assert.equal(inbox.messages.at(-1).taskId, task.id);
   });
 
   await test('リフレッシュトークンで更新できる', async () => {
