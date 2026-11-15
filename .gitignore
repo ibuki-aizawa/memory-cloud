@@ -1,0 +1,21 @@
+# 依存パッケージ・wrangler の作業フォルダ
+node_modules/
+.wrangler/
+
+# 認証情報（wrangler dev のローカル secret、環境変数ファイル）
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+
+# 記憶データのバックアップ（npm run db:export の出力）
+backup.sql
+*.sql.gz
+
+# setup-client.ps1 などが残すバックアップ
+*.bak
+
+# ログ・OS のファイル
+*.log
+.DS_Store
+Thumbs.db
