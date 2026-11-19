@@ -18,9 +18,10 @@
  */
 import { adminIdentity, bearerToken, handleAdmin, resolveAgent } from './agents.js';
 import { handleDashboard, isDashboardPath } from './dashboard.js';
+import { knowledgeForTask, rankEntities, relatedEntities, searchTerms } from './knowledge.js';
 import { GUIDE_PROMPT, GUIDE_PROMPT_NAME, GUIDE_RESOURCE, GUIDE_URI, GUIDE_VERSION, renderGuide, renderOnboardingPrompt } from './guide.js';
 
-const SERVER_INFO = { name: 'memory-mcp', version: '1.3.0' };
+const SERVER_INFO = { name: 'memory-mcp', version: '1.4.0' };
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 
 const MAX_ITEMS = 20;          // 1 回のツール呼び出しで扱う最大件数
@@ -71,7 +72,7 @@ const TOOLS = [
     description: `新しいエンティティを作成します（最大 ${MAX_ITEMS} 件）。既に存在する名前はスキップされるので、既存エンティティには add_observations を使ってください。`,
     inputSchema: {
       type: 'object',
-      properties: { entities: { type: 'array', items: entitySchema, maxItems: MAX_ITEMS } },
+      properties: { entities: { type: 'array', items: entitySchema, maxItems: MAX_ITEMS }, taskId: { type: 'integer', description: 'この知識を得たタスクの番号（任意。同じスコープのタスク）。あとで経緯をたどれる' } },
       required: ['entities'],
     },
   },
@@ -102,6 +103,7 @@ const TOOLS = [
             required: ['entityName', 'contents'],
           },
         },
+        taskId: { type: 'integer', description: 'この知識を得たタスクの番号（任意。同じスコープのタスク）。あとで経緯をたどれる' },
       },
       required: ['observations'],
     },
@@ -148,7 +150,7 @@ const TOOLS = [
   },
   {
     name: 'search_nodes',
-    description: `名前・種別・observation を部分一致で検索します。空白区切りの複数語は、より多く一致したものが上位になります。上位 ${SEARCH_LIMIT} 件と observation のプレビュー（各 ${SEARCH_PREVIEW} 件）を返すので、全文は open_nodes で取得してください。`,
+    description: `名前・種別・observation を部分一致で検索します（全角・半角は区別しない）。空白区切りの複数語は、より多く一致したものが上位になり、同じなら名前で一致したもの・つながりの多いものが上位です。上位 ${SEARCH_LIMIT} 件と observation のプレビュー（各 ${SEARCH_PREVIEW} 件）を返すので、全文は open_nodes で取得してください。`,
     inputSchema: {
       type: 'object',
       properties: { query: { type: 'string', description: '検索語（空白区切りで最大 5 語）' } },
@@ -157,12 +159,14 @@ const TOOLS = [
   },
   {
     name: 'open_nodes',
-    description: `名前を指定してエンティティを取得します（最大 ${MAX_ITEMS} 件）。全 observation と、接続するリレーションを返します。誰がいつ書いたかが必要なときだけ withAuthors: true を指定してください。`,
+    description: `名前を指定してエンティティを取得します（最大 ${MAX_ITEMS} 件）。全 observation と、接続するリレーションを返します。誰がいつ書いたかが必要なときだけ withAuthors: true を、関係をたどって関連する知識を探したいときだけ related: true を指定してください。`,
     inputSchema: {
       type: 'object',
       properties: {
         names: { type: 'array', items: { type: 'string' }, maxItems: MAX_ITEMS },
-        withAuthors: { type: 'boolean', description: 'true なら observation ごとの書き手（author）と日時（createdAt）、エンティティの作成者（createdBy）も返す' },
+        withAuthors: { type: 'boolean', description: 'true なら observation ごとの書き手（author）と日時（createdAt）、得たタスク（taskId）、エンティティの作成者（createdBy）も返す' },
+        related: { type: 'boolean', description: 'true なら関係をたどった近いエンティティ（related。最大 10 件、たどった関係と observation の先頭 1 件つき）も返す' },
+        depth: { type: 'integer', minimum: 1, maximum: 2, description: 'related でたどる段数（1 か 2。既定 2）' },
       },
       required: ['names'],
     },
@@ -217,12 +221,16 @@ const TOOLS = [
   },
   {
     name: 'task_get',
-    description: 'タスクの詳細と経過（引き受け・進捗メモ・引き継ぎの履歴）を返します。',
-    inputSchema: { type: 'object', properties: { id: { type: 'integer' } }, required: ['id'] },
+    description: 'タスクの詳細と経過（引き受け・進捗メモ・引き継ぎの履歴）を返します。withKnowledge: true なら、関係のありそうな知識（relatedKnowledge、最大 3 件）も添えます。',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'integer' }, withKnowledge: { type: 'boolean', description: 'true なら関係のありそうな知識も返す' } },
+      required: ['id'],
+    },
   },
   {
     name: 'task_claim',
-    description: `タスクを引き受けます。ほかのエージェントが担当中なら失敗します（同時に引き受けても成功するのは 1 人だけ）。担当には期限（${LEASE_MINUTES} 分）があり、task_update で延びます。期限が切れたタスクは別のエージェントが引き受けられます。`,
+    description: `タスクを引き受けます。ほかのエージェントが担当中なら失敗します（同時に引き受けても成功するのは 1 人だけ）。担当には期限（${LEASE_MINUTES} 分）があり、task_update で延びます。期限が切れたタスクは別のエージェントが引き受けられます。引き受けると、関係のありそうな知識（relatedKnowledge、最大 3 件）があれば添えます。`,
     inputSchema: { type: 'object', properties: { id: { type: 'integer' } }, required: ['id'] },
   },
   {
@@ -608,7 +616,12 @@ const HANDLERS = {
     addNickname(task, 'assignee', nick);
     addNickname(task, 'createdBy', nick);
     for (const e of results) addNickname(e, 'actor', nick);
-    return { task, events: results };
+    const out = { task, events: results };
+    if (args.withKnowledge === true) {
+      const knowledge = await knowledgeForTask(db, scope, task);
+      if (knowledge.length) out.relatedKnowledge = knowledge;
+    }
+    return out;
   },
 
   async task_claim(args, { db, scope, author }) {
@@ -636,7 +649,9 @@ const HANDLERS = {
       return { claimed: false, task, reason: `${task.assignee} が担当中です（期限 ${task.leaseExpiresAt} UTC）。別のタスクを選ぶか、send_message で相談してください` };
     }
     await addEvent(db, id, author, 'claimed', task.status, null);
-    return { claimed: true, task };
+    // 作業を始めるときに、関係のありそうな知識を添える（なければ出さない）
+    const knowledge = await knowledgeForTask(db, scope, task);
+    return knowledge.length ? { claimed: true, task, relatedKnowledge: knowledge } : { claimed: true, task };
   },
 
   async task_update(args, { db, scope, author, identity }) {
@@ -811,6 +826,7 @@ const HANDLERS = {
   },
 
   async create_entities(args, { db, scope, author }) {
+    const source = await sourceTask(db, scope, args.taskId);
     const entities = list(args.entities, 'entities').map((e, i) => ({
       name: str(e && e.name, `entities[${i}].name`, MAX_NAME_LENGTH),
       entityType: str(e && e.entityType, `entities[${i}].entityType`, MAX_NAME_LENGTH),
@@ -836,12 +852,12 @@ const HANDLERS = {
            FROM json_each(?2)`
         ).bind(scope, payload, author),
         db.prepare(
-          `INSERT OR IGNORE INTO observations (entity_id, content, author)
-           SELECT e.id, o.value, ?3
+          `INSERT OR IGNORE INTO observations (entity_id, content, author, task_id)
+           SELECT e.id, o.value, ?3, ?4
            FROM json_each(?2) AS j
            JOIN entities AS e ON e.scope = ?1 AND e.name = json_extract(j.value, '$.name')
            JOIN json_each(j.value, '$.observations') AS o`
-        ).bind(scope, payload, author),
+        ).bind(scope, payload, author, source),
       ]);
     }
 
@@ -872,6 +888,7 @@ const HANDLERS = {
   },
 
   async add_observations(args, { db, scope, author }) {
+    const source = await sourceTask(db, scope, args.taskId);
     const items = list(args.observations, 'observations').map((o, i) => ({
       entityName: str(o && o.entityName, `observations[${i}].entityName`, MAX_NAME_LENGTH),
       contents: strings(o && o.contents, `observations[${i}].contents`),
@@ -880,12 +897,12 @@ const HANDLERS = {
     const payload = JSON.stringify(items);
     const [inserted] = await db.batch([
       db.prepare(
-        `INSERT OR IGNORE INTO observations (entity_id, content, author)
-         SELECT e.id, c.value, ?3
+        `INSERT OR IGNORE INTO observations (entity_id, content, author, task_id)
+         SELECT e.id, c.value, ?3, ?4
          FROM json_each(?2) AS j
          JOIN entities AS e ON e.scope = ?1 AND e.name = json_extract(j.value, '$.entityName')
          JOIN json_each(j.value, '$.contents') AS c`
-      ).bind(scope, payload, author),
+      ).bind(scope, payload, author, source),
       db.prepare(
         `UPDATE entities SET updated_at = datetime('now')
          WHERE scope = ?1 AND name IN (SELECT json_extract(value, '$.entityName') FROM json_each(?2))`
@@ -948,33 +965,9 @@ const HANDLERS = {
 
   async search_nodes(args, { db, scope }) {
     const query = str(args.query, 'query', 500);
-    const terms = unique(query.split(/\s+/).filter(Boolean)).slice(0, 5);
+    const terms = searchTerms(query);
     if (!terms.length) throw new ToolInputError('query が空です');
-
-    // ?1 = scope, ?2.. = 各語の LIKE パターン
-    const params = [scope, ...terms.map((t) => `%${escapeLike(t)}%`)];
-    const scoreExpr = terms
-      .map((_, i) => {
-        const p = `?${i + 2}`;
-        return `(CASE WHEN e.name LIKE ${p} ESCAPE '\\'
-                        OR e.entity_type LIKE ${p} ESCAPE '\\'
-                        OR EXISTS (SELECT 1 FROM observations AS o
-                                   WHERE o.entity_id = e.id AND o.content LIKE ${p} ESCAPE '\\')
-                      THEN 1 ELSE 0 END)`;
-      })
-      .join(' + ');
-
-    const { results: hits } = await db
-      .prepare(
-        `SELECT id, name, entity_type, score FROM (
-           SELECT e.id, e.name, e.entity_type, e.updated_at, (${scoreExpr}) AS score
-           FROM entities AS e WHERE e.scope = ?1
-         ) WHERE score > 0
-         ORDER BY score DESC, updated_at DESC
-         LIMIT ${SEARCH_LIMIT + 1}`
-      )
-      .bind(...params)
-      .all();
+    const hits = await rankEntities(db, [scope], terms, SEARCH_LIMIT + 1);
 
     const truncated = hits.length > SEARCH_LIMIT;
     const top = hits.slice(0, SEARCH_LIMIT);
@@ -1003,6 +996,9 @@ const HANDLERS = {
   async open_nodes(args, { db, scope }) {
     const names = unique(list(args.names, 'names').map((n, i) => str(n, `names[${i}]`, MAX_NAME_LENGTH)));
     const withAuthors = args.withAuthors === true;
+    const related = args.related === true;
+    const depth = args.depth === undefined ? 2 : args.depth;
+    if (related && ![1, 2].includes(depth)) throw new ToolInputError('depth は 1 か 2 にしてください');
     const { results: rows } = await db
       .prepare(
         `SELECT id, name, entity_type, created_by FROM entities
@@ -1045,11 +1041,12 @@ const HANDLERS = {
         }
         const e = { name: r.name, entityType: r.entity_type, createdBy: r.created_by };
         addNickname(e, 'createdBy', nick);
-        e.observations = obs.map((o) => addNickname({ ...o }, 'author', nick));
+        e.observations = obs.map(({ taskId: t, ...o }) => addNickname(t ? { ...o, taskId: t } : o, 'author', nick));
         return e;
       }),
       relations,
     };
+    if (related && ids.length) out.related = await relatedEntities(db, ids, depth);
     const notFound = names.filter((n) => !found.has(n));
     if (notFound.length) out.not_found = notFound;
     return out;
@@ -1080,7 +1077,7 @@ async function observationsFor(db, ids) {
   if (!ids.length) return map;
   const { results } = await db
     .prepare(
-      `SELECT entity_id, content, author, created_at FROM observations
+      `SELECT entity_id, content, author, created_at, task_id FROM observations
        WHERE entity_id IN (SELECT value FROM json_each(?1))
        ORDER BY id`
     )
@@ -1088,7 +1085,7 @@ async function observationsFor(db, ids) {
     .all();
   for (const r of results) {
     if (!map.has(r.entity_id)) map.set(r.entity_id, []);
-    map.get(r.entity_id).push({ content: r.content, author: r.author, createdAt: r.created_at });
+    map.get(r.entity_id).push({ content: r.content, author: r.author, createdAt: r.created_at, taskId: r.task_id });
   }
   return map;
 }
@@ -1189,6 +1186,15 @@ export async function saveProfile(db, identityName, nicknameValue, bioValue) {
   return out;
 }
 
+/** 知識を得たタスクの番号（任意）。同じスコープにあるタスクだけ受け付ける */
+async function sourceTask(db, scope, value) {
+  if (value === undefined || value === null) return null;
+  const id = taskId(value, 'taskId');
+  const row = await db.prepare('SELECT id FROM tasks WHERE id = ?1 AND scope = ?2').bind(id, scope).first();
+  if (!row) throw new ToolInputError(`taskId: このスコープにタスク ${id} はありません`);
+  return id;
+}
+
 /** 本人確認の名前 → 呼び名 の Map */
 async function nicknames(db, names) {
   const list = unique(names.filter(Boolean));
@@ -1286,9 +1292,6 @@ function unique(values) {
   return [...new Set(values)];
 }
 
-function escapeLike(s) {
-  return s.replace(/[\\%_]/g, (c) => `\\${c}`);
-}
 
 // ---------------------------------------------------------------------------
 // レスポンス

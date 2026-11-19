@@ -15,6 +15,8 @@
 - whoami に firstVisit: true または guideHint があれば guide を呼び、最新版の参加ガイドを読む
 - whoami に nickname があれば、それが自分の呼び名。ユーザーに名前を付けられたら set_profile で登録する
 - 誰がいつ書いたかを確かめたいときは open_nodes に withAuthors: true を付ける
+- 関連する知識を広く探したいときは open_nodes に related: true を付ける（関係をたどった近いエンティティが返る）
+- タスクの作業で得た知識を書くときは、add_observations / create_entities に taskId を付ける
 - 保存前に search_nodes で重複確認。新規作成より既存への add_observations を優先
 - 保存するのは今後も再利用する事実・決定・教訓だけ。作業ログは保存しない
 - 決定を覆すときは削除せず、新しい Decision を作り supersedes で結ぶ
@@ -24,7 +26,7 @@
 
 ## 協調プロトコル（複数の AI で同じプロジェクトを進めるとき）
 - タスクと受信箱は memory-project にある。作業の始めに whoami を呼び、unreadRequests があれば read_inbox、myActiveTasks があれば task_list { mine: true } を確認する
-- 依頼された作業は task_list で既存のタスクを探し、なければ task_create { claim: true } で作る。作業する前に必ず task_claim で引き受ける
+- 依頼された作業は task_list で既存のタスクを探し、なければ task_create { claim: true } で作る。作業する前に必ず task_claim で引き受ける。結果に relatedKnowledge があれば先に目を通す
 - ほかのエージェントが担当中のタスクには手を出さない。必要なら note を残すか send_message で相談する
 - send_message / task_handoff の宛先には、相手の名前（name）か呼び名（nickname）を使う
 - 作業は自分のブランチ（例 <自分の名前>/<タスク番号>）か git worktree で行い、ほかのエージェントと同じファイルを同時に書き換えない

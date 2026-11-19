@@ -439,7 +439,7 @@ async function memoryPage({ db, scope, nick, tz, url }) {
   }
   const { results } = await db
     .prepare(
-      `SELECT o.id, o.content, o.author, o.created_at, e.name, e.entity_type
+      `SELECT o.id, o.content, o.author, o.created_at, o.task_id, e.name, e.entity_type
        FROM observations AS o JOIN entities AS e ON e.id = o.entity_id
        WHERE ${where.join(' AND ')}
        ORDER BY o.id DESC LIMIT ${PAGE_SIZE + 1}`
@@ -453,7 +453,7 @@ async function memoryPage({ db, scope, nick, tz, url }) {
   <td class="nowrap muted">${esc(time(o.created_at, tz))}</td>
   <td>${o.author ? `<a href="${esc(memoryHref(scope, o.author))}">${who(o.author, nick)}</a>` : '<span class="muted">不明</span>'}</td>
   <td><a href="${esc(entityHref(scope, o.name))}"><code>${esc(o.name)}</code></a></td>
-  <td>${esc(o.content)}</td>
+  <td>${esc(o.content)}${o.task_id ? ` <a class="muted" href="/dashboard/tasks/${o.task_id}?scope=${encodeURIComponent(scope)}">#${o.task_id}</a>` : ''}</td>
 </tr>`
     )
     .join('');
@@ -520,7 +520,7 @@ async function entityPage(ctx) {
   const e = await db.prepare('SELECT * FROM entities WHERE scope = ?1 AND name = ?2').bind(scope, name).first();
   if (!e) return html(404, 'エンティティが見つかりません', scopeNav(scope, 'entities'));
   const { results: observations } = await db
-    .prepare(`SELECT id, content, author, created_at FROM observations WHERE entity_id = ?1 ORDER BY id LIMIT ${ENTITY_DETAIL_LIMIT}`)
+    .prepare(`SELECT id, content, author, created_at, task_id FROM observations WHERE entity_id = ?1 ORDER BY id LIMIT ${ENTITY_DETAIL_LIMIT}`)
     .bind(e.id)
     .all();
   const { results: relations } = await db
@@ -536,7 +536,8 @@ async function entityPage(ctx) {
     .map(
       (o) => `<li>
   <div class="text">${multiline(o.content)}</div>
-  <div class="meta">${o.author ? who(o.author, nick) : '<span class="muted">書き手不明</span>'} <span class="muted">· ${esc(time(o.created_at, tz))}</span></div>
+  <div class="meta">${o.author ? who(o.author, nick) : '<span class="muted">書き手不明</span>'} <span class="muted">· ${esc(time(o.created_at, tz))}</span>
+    ${o.task_id ? `· <a href="/dashboard/tasks/${o.task_id}?scope=${encodeURIComponent(scope)}">タスク #${o.task_id}</a>` : ''}</div>
   <div class="actions">
     <details class="edit"><summary>直す</summary>
     ${form(ctx, 'obs_edit', { id: o.id }, `<textarea name="content" rows="3" maxlength="${MAX_CONTENT}" required>${esc(o.content)}</textarea>

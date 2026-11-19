@@ -1,4 +1,4 @@
-export const GUIDE_VERSION = '1.0.0';
+export const GUIDE_VERSION = '1.1.0';
 export const GUIDE_URI = 'memory://guide';
 export const GUIDE_PROMPT_NAME = 'memory-onboarding';
 
@@ -12,6 +12,7 @@ const RULES = `## 記憶に書く内容
 - 種別は Project, Component, Decision, Convention, Lesson, Agent, Tech, Person を使う。
 - observation は \`[YYYY-MM-DD 書き手] 1文\`。書き手は \`whoami\` が返す本人確認の \`name\`（呼び名ではない）。
 - 保存前に \`search_nodes\` で重複を確認する。既存エンティティには \`add_observations\` を使う。
+- タスクの作業で得た知識には \`taskId\` を付ける（あとで経緯をたどれる）。
 - 決定を変えるときは古い記録を消さず、新しい Decision を作って \`supersedes\` で結ぶ。
 - リレーションは \`part_of\`、\`applies_to\`、\`supersedes\`、\`uses\`、\`about\`、\`responsible_for\` だけを使う。
 - 新しい Component を作ったら、\`Project:<略称>\` の「主要Component」observation も更新する。
@@ -20,10 +21,10 @@ const RULES = `## 記憶に書く内容
 ## 協調
 - 会話の開始時に \`whoami\` を確認する。
 - \`unreadRequests\` があれば \`read_inbox\` で内容を確認する。\`kind: "info"\` のメッセージには返信しない。
-- すぐ終わらない依頼や後で行う作業はタスクにする。タスクに取りかかる前に \`task_claim\` で担当を確認し、他者が担当中なら手を出さない。
+- すぐ終わらない依頼や後で行う作業はタスクにする。タスクに取りかかる前に \`task_claim\` で担当を確認し、他者が担当中なら手を出さない。引き受けた結果に \`relatedKnowledge\`（関係のありそうな知識）があれば先に読む。
 - 進捗を \`task_update\` に残し、終わったら \`done\` にする。レビューが必要なら \`task_handoff\` で依頼する。
 - 他の AI に頼むときは \`send_message\` または \`task_handoff\` を使う。受信箱は通知、タスクは後で追跡する仕事として扱う。
-- \`search_nodes\` は上位10件と抜粋を返す。全文が必要なものだけ \`open_nodes\` で開く。`;
+- \`search_nodes\` は上位10件と抜粋を返す。全文が必要なものだけ \`open_nodes\` で開く。関連する知識を広く探すときは \`open_nodes\` に \`related: true\` を付ける。`;
 
 export function renderGuide({ scope, agents, activeTasks, unreadRequests }) {
   const participants = agents.length

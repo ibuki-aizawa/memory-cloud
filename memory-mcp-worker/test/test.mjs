@@ -804,7 +804,7 @@ await test('guide: 初回ヒント、ガイド内容、訪問記録、resource/p
   const who = await tool(token, 'whoami', {}, P);
   assert.equal(who.firstVisit, true);
   assert.match(who.guideHint, /初めて/);
-  assert.equal(who.guideVersion, '1.0.0');
+  assert.match(who.guideVersion, /^\d+\.\d+\.\d+$/);
   const resourceList = await post(P, { jsonrpc: '2.0', id: nextId++, method: 'resources/list' }, token);
   assert.equal(resourceList.body.result.resources[0].uri, 'memory://guide');
   const resource = await post(P, { jsonrpc: '2.0', id: nextId++, method: 'resources/read', params: { uri: 'memory://guide' } }, token);
@@ -813,7 +813,7 @@ await test('guide: 初回ヒント、ガイド内容、訪問記録、resource/p
   assert.equal(afterResourceRead.firstVisit, true, 'resource の先読みでは既読にしない');
 
   const guide = await tool(token, 'guide', {}, P);
-  assert.match(guide, /ガイド版: 1\.0\.0/);
+  assert.ok(guide.includes(`ガイド版: ${who.guideVersion}`));
   assert.match(guide, /秘密情報/);
   assert.match(guide, /Project:myapp/);
   assert.match(guide, /guide-test/);
@@ -833,6 +833,101 @@ await test('guide: 初回ヒント、ガイド内容、訪問記録、resource/p
   assert.match(stale.guideHint, /更新/);
   await tool(token, 'guide', {}, P);
   assert.equal((await tool(token, 'whoami', {}, P)).guideHint, undefined);
+});
+
+// --- 知識ベース（#42〜#45） ---------------------------------------------------
+
+const KB = '/mcp/p/kb';
+await test('知識の準備（評価用の固定データ）', async () => {
+  const r = await tool(claudeTok, 'create_entities', { entities: [
+    { name: 'Tech:PowerShell7', entityType: 'Tech', observations: ['[2026-11-01 claude-a] Windows の自動化に使うシェル'] },
+    { name: 'Tech:D1', entityType: 'Tech', observations: ['[2026-11-01 claude-a] Cloudflare の SQLite データベース'] },
+    { name: 'Lesson:kb/ps-encoding', entityType: 'Lesson', observations: ['[2026-11-02 claude-a] PowerShell で UTF-8 の BOM が付き、bash の読み込みが壊れた'] },
+    { name: 'Lesson:kb/ps-heredoc', entityType: 'Lesson', observations: ['[2026-11-03 claude-a] PowerShell の here-string は閉じる行を行頭に置く'] },
+    { name: 'Lesson:kb/d1-export', entityType: 'Lesson', observations: ['[2026-11-04 claude-a] D1 の export は仮想テーブルを書き出せない。バックアップの前に確認する'] },
+    { name: 'Lesson:kb/misc', entityType: 'Lesson', observations: ['[2026-11-05 claude-a] powershell という語を本文に含むだけの記録'] },
+  ] }, KB);
+  assert.equal(r.created.length, 6);
+  const rel = await tool(claudeTok, 'create_relations', { relations: [
+    { from: 'Lesson:kb/ps-encoding', to: 'Tech:PowerShell7', relationType: 'about' },
+    { from: 'Lesson:kb/ps-heredoc', to: 'Tech:PowerShell7', relationType: 'about' },
+    { from: 'Lesson:kb/d1-export', to: 'Tech:D1', relationType: 'about' },
+  ] }, KB);
+  assert.ok(!rel.error);
+});
+
+await test('a. 検索の並び順: 名前の一致・完全一致・つながりが上位、全角でも見つかる', async () => {
+  const names = async (q) => (await tool(claudeTok, 'search_nodes', { query: q }, KB)).results.map((x) => x.name);
+  assert.equal((await names('PowerShell7'))[0], 'Tech:PowerShell7', '「種別:」を除いた名前の完全一致が 1 位');
+  const ps = await names('PowerShell');
+  assert.equal(ps[0], 'Tech:PowerShell7', '名前で一致し、つながりが多いもの');
+  assert.equal(ps.at(-1), 'Lesson:kb/misc', '本文だけの一致はつながりのあるものより下');
+  assert.equal((await names('ＰｏｗｅｒＳｈｅｌｌ　ＢＯＭ'))[0], 'Lesson:kb/ps-encoding', '全角・全角空白でも 2 語とも一致したものが 1 位');
+  assert.equal((await names('D1 バックアップ'))[0], 'Lesson:kb/d1-export', '2 語一致が 1 語一致より上');
+  const none = await tool(claudeTok, 'search_nodes', { query: 'まったく関係ない語' }, KB);
+  assert.deepEqual(none.results, []);
+  assert.ok(none.hint);
+});
+
+await test('b. open_nodes の related: 関係をたどって関連する知識を返す。付けなければ今までどおり', async () => {
+  const plain = await tool(claudeTok, 'open_nodes', { names: ['Lesson:kb/ps-encoding'] }, KB);
+  assert.equal(plain.related, undefined, '既定では返さない');
+  const r = await tool(claudeTok, 'open_nodes', { names: ['Lesson:kb/ps-encoding'], related: true }, KB);
+  assert.deepEqual(r.related.map((x) => [x.name, x.distance]), [['Tech:PowerShell7', 1], ['Lesson:kb/ps-heredoc', 2]]);
+  assert.equal(r.related[1].via, 'Lesson:kb/ps-heredoc about Tech:PowerShell7', 'どの関係でたどり着いたか');
+  assert.ok(r.related[1].preview.includes('here-string'));
+  const one = await tool(claudeTok, 'open_nodes', { names: ['Lesson:kb/ps-encoding'], related: true, depth: 1 }, KB);
+  assert.deepEqual(one.related.map((x) => x.name), ['Tech:PowerShell7']);
+  assert.ok((await tool(claudeTok, 'open_nodes', { names: ['Tech:D1'], related: true, depth: 3 }, KB)).error);
+  const alone = await tool(claudeTok, 'open_nodes', { names: ['Lesson:kb/misc'], related: true }, KB);
+  assert.deepEqual(alone.related, []);
+});
+
+await test('c. task_claim に関係のありそうな知識が添えられる。task_get は withKnowledge のときだけ', async () => {
+  const { task } = await tool(claudeTok, 'task_create', { title: 'D1 のバックアップ手順を見直す', description: '仮想テーブルを足す前に確認する' }, KB);
+  const claimed = await tool(codexTok, 'task_claim', { id: task.id }, KB);
+  assert.equal(claimed.claimed, true);
+  assert.equal(claimed.relatedKnowledge[0].name, 'Lesson:kb/d1-export');
+  assert.ok(claimed.relatedKnowledge[0].preview.includes('export'));
+  assert.ok(claimed.relatedKnowledge.length <= 3);
+  assert.equal((await tool(codexTok, 'task_get', { id: task.id }, KB)).relatedKnowledge, undefined);
+  assert.ok((await tool(codexTok, 'task_get', { id: task.id, withKnowledge: true }, KB)).relatedKnowledge.length);
+
+  // global の知識も探す。関係のなさそうなタスクには添えない
+  await tool(claudeTok, 'create_entities', { entities: [{ name: 'Convention:global/kb-wrangler', entityType: 'Convention', observations: ['Wrangler の設定がなければ cf CLI を使う'] }] }, G);
+  const { task: t2 } = await tool(claudeTok, 'task_create', { title: 'Wrangler でデプロイする' }, KB);
+  const c2 = await tool(claudeTok, 'task_claim', { id: t2.id }, KB);
+  assert.equal(c2.relatedKnowledge[0].name, 'Convention:global/kb-wrangler');
+  assert.equal(c2.relatedKnowledge[0].scope, 'global', 'ほかのスコープの知識にはスコープを添える');
+  const { task: t3 } = await tool(claudeTok, 'task_create', { title: '昼ご飯を決める' }, KB);
+  assert.equal((await tool(claudeTok, 'task_claim', { id: t3.id }, KB)).relatedKnowledge, undefined);
+});
+
+await test('c. タスクの文から検索語を取り出す', async () => {
+  const { taskTerms } = await import('../src/knowledge.js');
+  assert.deepEqual(taskTerms('PowerShell の文字コードを直す'), ['PowerShell', '文字', 'コード']);
+  assert.deepEqual(taskTerms('タスクを実装する', ''), [], '手がかりにならない語は使わない');
+  assert.ok(taskTerms('ダッシュボードの改善').includes('ダッシュボード'));
+});
+
+await test('d. observation に得たタスクを記録できる（同じスコープのタスクだけ）', async () => {
+  const { task } = await tool(claudeTok, 'task_create', { title: '経緯を残す' }, KB);
+  const add = await tool(claudeTok, 'add_observations', { taskId: task.id, observations: [{ entityName: 'Tech:D1', contents: ['[2026-11-19 claude-a] タスクで得た知識'] }] }, KB);
+  assert.equal(add.added, 1);
+  await tool(claudeTok, 'create_entities', { taskId: task.id, entities: [{ name: 'Lesson:kb/from-task', entityType: 'Lesson', observations: ['作るときも付けられる'] }] }, KB);
+  const open = await tool(claudeTok, 'open_nodes', { names: ['Tech:D1', 'Lesson:kb/from-task'], withAuthors: true }, KB);
+  const d1 = open.entities.find((e) => e.name === 'Tech:D1').observations;
+  assert.equal(d1.find((o) => o.content.includes('タスクで得た')).taskId, task.id);
+  assert.equal(d1[0].taskId, undefined, '付けなかったものには出ない');
+  assert.equal(open.entities.find((e) => e.name === 'Lesson:kb/from-task').observations[0].taskId, task.id);
+  const plain = await tool(claudeTok, 'open_nodes', { names: ['Tech:D1'] }, KB);
+  assert.ok(plain.entities[0].observations.every((o) => typeof o === 'string'), '既定の形は文字列の配列のまま');
+
+  const { task: other } = await tool(claudeTok, 'task_create', { title: 'ほかのスコープ' }, G);
+  assert.ok((await tool(claudeTok, 'add_observations', { taskId: other.id, observations: [{ entityName: 'Tech:D1', contents: ['x'] }] }, KB)).error);
+  assert.ok((await tool(claudeTok, 'add_observations', { taskId: 99999, observations: [{ entityName: 'Tech:D1', contents: ['x'] }] }, KB)).error);
+  const page = await dash('GET', '/dashboard/entity?scope=p%3Akb&name=Tech%3AD1', { cookie: dashCookie });
+  assert.ok(page.text.includes(`/dashboard/tasks/${task.id}?scope=p%3Akb`), '管理画面にタスクへのリンク');
 });
 
 console.log(`\n${passed} 件のテストに成功しました`);

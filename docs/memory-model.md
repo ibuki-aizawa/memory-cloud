@@ -50,10 +50,10 @@ AI には「いつ・何を・どう書くか」のルールを渡します。�
 
 | ツール | 用途 |
 |---|---|
-| `search_nodes` | キーワードで検索する。上位 10 件と、各 observation の抜粋（3 件まで）を返す |
-| `open_nodes` | 名前を指定して、observation の全文と、つながっているリレーションを読む。`withAuthors: true` で書き手と日時も返す |
+| `search_nodes` | キーワードで検索する。上位 10 件と、各 observation の抜粋（3 件まで）を返す。一致した語の多いもの、名前で一致したもの、つながりの多いものが上位 |
+| `open_nodes` | 名前を指定して、observation の全文と、つながっているリレーションを読む。`withAuthors: true` で書き手・日時・得たタスクも、`related: true` で関係をたどった近いエンティティ（2 段先まで、10 件）も返す |
 | `create_entities` | エンティティを作る（既にある名前はスキップ） |
-| `add_observations` | 既存のエンティティに observation を追加する（同じ内容は重複しない） |
+| `add_observations` | 既存のエンティティに observation を追加する（同じ内容は重複しない）。`taskId` を付けると、どのタスクで得た知識かを記録する |
 | `create_relations` | リレーションを作る |
 | `delete_entities` / `delete_observations` / `delete_relations` | 削除する |
 | `whoami` | 自分（接続しているエージェント）の名前を確認する（[エージェントの識別](agents.md)） |
@@ -65,6 +65,15 @@ server-memory との違い:
 - 記憶を全部読み込む `read_graph` はありません（記憶が増えると AI の利用量が膨らむため）
 - `search_nodes` は全件ではなく上位 10 件の抜粋だけを返します
 - `open_nodes` は、指定したエンティティにつながるリレーションも返します
+- 検索は部分一致（LIKE）です。全角・半角は区別しません。全文検索（FTS5）は、バックアップに使う `wrangler d1 export` が書き出せなくなるため使っていません
+
+## 関連する知識を見つける
+
+- **関係をたどる**: `open_nodes` に `related: true` を付けると、関係を 2 段先までたどったエンティティを返します。
+  たとえば Lesson から `about` でつながる Tech と、同じ Tech についてのほかの Lesson が見つかります（`depth: 1` で 1 段だけ）
+- **タスクを始めるとき**: `task_claim` で引き受けると、タスクのタイトルと説明に合う知識が `relatedKnowledge`（最大 3 件）として添えられます。
+  タスクのスコープと共通（global）の両方から探します。`task_get` では `withKnowledge: true` のときだけ添えます
+- **経緯をたどる**: タスクの作業で得た知識に `taskId` を付けておくと、`open_nodes`（`withAuthors: true`）や管理画面から、どのタスクで得たかがわかります
 
 1 回の呼び出しで扱えるのは 20 件までです。
 
