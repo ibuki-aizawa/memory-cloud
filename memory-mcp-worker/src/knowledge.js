@@ -171,3 +171,30 @@ function clip(text) {
 export function escapeLike(s) {
   return s.replace(/[\\%_]/g, (c) => `\\${c}`);
 }
+
+/**
+ * 関係の種類（#19）。向きは「from が to に対して〜」。create_relations はここにある種類だけを受け付ける。
+ * 足さなかった候補: supports（about と derived_from で足りる）、applied_to（applies_to と紛らわしい）、
+ * validated_by（検証の流れ #21 を作るときに考える）
+ */
+export const RELATION_TYPES = {
+  part_of: 'from は to の一部（Component → Project）',
+  applies_to: 'from（決まり・教訓）が to に当てはまる（Convention → Component）',
+  supersedes: 'from が to を置き換える。古い to は消さずに残す（Decision → Decision）',
+  uses: 'from が to を使う（Project・Component・Person → Tech）',
+  about: 'from は to についての知識（Lesson → Tech）',
+  responsible_for: 'from が to を担当する（Agent・Person → Component）',
+  contradicts: 'from と to の内容が食い違う。どちらが正しいか確かめるまで両方残す（Lesson → Lesson）',
+  derived_from: 'from は to から導いた知識（Convention → Lesson、Lesson → Decision）',
+};
+
+// よくある書き間違い → 正しい種類
+const RELATION_ALIASES = { applied_to: 'applies_to', apply_to: 'applies_to', partof: 'part_of', use: 'uses', contradict: 'contradicts', derives_from: 'derived_from', supercedes: 'supersedes' };
+
+/** 関係の種類を確かめる。正しければその名前、違えば null と、言い換えの候補を返す */
+export function checkRelationType(value) {
+  if (Object.hasOwn(RELATION_TYPES, value)) return { ok: value };
+  const key = value.toLowerCase().replace(/[\s-]+/g, '_');
+  if (Object.hasOwn(RELATION_TYPES, key)) return { ok: null, suggestion: key };
+  return { ok: null, suggestion: Object.hasOwn(RELATION_ALIASES, key) ? RELATION_ALIASES[key] : null };
+}

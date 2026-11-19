@@ -18,10 +18,10 @@
  */
 import { adminIdentity, bearerToken, handleAdmin, resolveAgent } from './agents.js';
 import { handleDashboard, isDashboardPath } from './dashboard.js';
-import { knowledgeForTask, rankEntities, relatedEntities, searchTerms } from './knowledge.js';
+import { RELATION_TYPES, checkRelationType, knowledgeForTask, rankEntities, relatedEntities, searchTerms } from './knowledge.js';
 import { GUIDE_PROMPT, GUIDE_PROMPT_NAME, GUIDE_RESOURCE, GUIDE_URI, GUIDE_VERSION, renderGuide, renderOnboardingPrompt } from './guide.js';
 
-const SERVER_INFO = { name: 'memory-mcp', version: '1.4.0' };
+const SERVER_INFO = { name: 'memory-mcp', version: '1.5.0' };
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 
 const MAX_ITEMS = 20;          // 1 回のツール呼び出しで扱う最大件数
@@ -66,6 +66,19 @@ const relationSchema = {
   required: ['from', 'to', 'relationType'],
 };
 
+// create_relations では種類を決まったものに絞る（delete_relations は古い種類も消せるよう絞らない）
+const newRelationSchema = {
+  ...relationSchema,
+  properties: {
+    ...relationSchema.properties,
+    relationType: {
+      type: 'string',
+      enum: Object.keys(RELATION_TYPES),
+      description: `関係の種類。向きは「from が to に対して〜」。${Object.entries(RELATION_TYPES).map(([k, v]) => `${k}: ${v}`).join(' / ')}`,
+    },
+  },
+};
+
 const TOOLS = [
   {
     name: 'create_entities',
@@ -78,10 +91,10 @@ const TOOLS = [
   },
   {
     name: 'create_relations',
-    description: `エンティティ間のリレーションを作成します（最大 ${MAX_ITEMS} 件）。両端のエンティティが存在している必要があります。`,
+    description: `エンティティ間のリレーションを作成します（最大 ${MAX_ITEMS} 件）。両端のエンティティが存在している必要があります。relationType は決まった種類だけ使えます（part_of, applies_to, supersedes, uses, about, responsible_for, contradicts, derived_from）。`,
     inputSchema: {
       type: 'object',
-      properties: { relations: { type: 'array', items: relationSchema, maxItems: MAX_ITEMS } },
+      properties: { relations: { type: 'array', items: newRelationSchema, maxItems: MAX_ITEMS } },
       required: ['relations'],
     },
   },
@@ -871,6 +884,13 @@ const HANDLERS = {
 
   async create_relations(args, { db, scope, author }) {
     const relations = list(args.relations, 'relations').map((r, i) => relation(r, `relations[${i}]`));
+    relations.forEach((r, i) => {
+      const { ok, suggestion } = checkRelationType(r.relationType);
+      if (ok) return;
+      throw new ToolInputError(
+        `relations[${i}].relationType: ${r.relationType} は使えません。${suggestion ? `${suggestion} のことですか？ ` : ''}使える種類: ${Object.keys(RELATION_TYPES).join(', ')}`
+      );
+    });
     const missing = await missingNames(db, scope, unique(relations.flatMap((r) => [r.from, r.to])));
     const res = await db
       .prepare(

@@ -10,7 +10,7 @@
 - search_nodes は上位10件と observation の抜粋だけを返す。全文が要るものだけ open_nodes で開く
 - 命名: 種別:スコープ/名前（例 Decision:{{PROJECT}}/use-sqlite）。スコープは {{PROJECT}} か global
 - 種別は Project, Component, Decision, Convention, Lesson, Agent, Tech, Person のみ
-- 関係は part_of, applies_to, supersedes, uses, about, responsible_for のみ
+- 関係は part_of, applies_to, supersedes, uses, about, responsible_for, contradicts, derived_from のみ（ほかは作れない）。食い違う知識は消さずに contradicts で結んで確かめる。ほかの知識から導いたものは derived_from で元と結ぶ
 - observation は "[YYYY-MM-DD 書き手] 1文"。書き手は whoami で確認した自分の名前 name（呼び名ではない。サーバーも書き手を自動で記録する）
 - whoami に firstVisit: true または guideHint があれば guide を呼び、最新版の参加ガイドを読む
 - whoami に nickname があれば、それが自分の呼び名。ユーザーに名前を付けられたら set_profile で登録する

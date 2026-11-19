@@ -551,7 +551,7 @@ async function entityPage(ctx) {
   const relItems = relations
     .map(
       (r) => `<li><a href="${esc(entityHref(scope, r.from_name))}"><code>${esc(r.from_name)}</code></a>
-  <strong>${esc(r.relation_type)}</strong>
+  <strong>${esc(r.relation_type)}</strong>${r.relation_type === 'contradicts' ? ' <span class="badge warn">食い違い（確かめる）</span>' : ''}
   <a href="${esc(entityHref(scope, r.to_name))}"><code>${esc(r.to_name)}</code></a>
   ${r.created_by ? `<span class="muted">· ${who(r.created_by, nick)}</span>` : ''}
   ${form(ctx, 'relation_delete', { id: r.id }, '<button type="submit" class="small danger">削除</button>')}</li>`

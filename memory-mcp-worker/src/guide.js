@@ -1,4 +1,4 @@
-export const GUIDE_VERSION = '1.1.0';
+export const GUIDE_VERSION = '1.2.0';
 export const GUIDE_URI = 'memory://guide';
 export const GUIDE_PROMPT_NAME = 'memory-onboarding';
 
@@ -14,7 +14,9 @@ const RULES = `## 記憶に書く内容
 - 保存前に \`search_nodes\` で重複を確認する。既存エンティティには \`add_observations\` を使う。
 - タスクの作業で得た知識には \`taskId\` を付ける（あとで経緯をたどれる）。
 - 決定を変えるときは古い記録を消さず、新しい Decision を作って \`supersedes\` で結ぶ。
-- リレーションは \`part_of\`、\`applies_to\`、\`supersedes\`、\`uses\`、\`about\`、\`responsible_for\` だけを使う。
+- リレーションは \`part_of\`、\`applies_to\`、\`supersedes\`、\`uses\`、\`about\`、\`responsible_for\`、\`contradicts\`、\`derived_from\` だけを使う（ほかの種類は作れない）。
+- 既存の知識と食い違う知識を得たら、古いほうを消さずに \`contradicts\` で結び、どちらが正しいかを確かめる。確かめて置き換えるなら新しい Decision から \`supersedes\`。
+- 教訓や決まりを、ほかの知識から導いたときは \`derived_from\` で元の知識と結ぶ。
 - 新しい Component を作ったら、\`Project:<略称>\` の「主要Component」observation も更新する。
 - global のエンティティは内容を複製せず、名前で参照する（例: \`Tech:PowerShell7\`）。
 

@@ -13,6 +13,25 @@ memory-cloud の記憶が、どんな形で保存され、AI がどう使うか�
 | observation | エンティティに付けるメモ。1 件 1 文 | `[2026-11-15 owner] 手軽さを優先して SQLite を採用` |
 | リレーション | エンティティどうしのつながり | `Component:myapp/auth` → `part_of` → `Project:myapp` |
 
+## リレーションの種類
+
+リレーションは、次の 8 種類だけを作れます（`create_relations` はほかの種類を受け付けません）。向きは「from が to に対して〜」と読みます。
+
+| 種類 | 意味 | 例 |
+|---|---|---|
+| `part_of` | from は to の一部 | `Component:myapp/auth` → `Project:myapp` |
+| `applies_to` | from（決まり・教訓）が to に当てはまる | `Convention:global/pwsh-utf8` → `Component:myapp/scripts` |
+| `supersedes` | from が to を置き換える。古い to は消さずに残す | `Decision:myapp/use-d1` → `Decision:myapp/use-sqlite` |
+| `uses` | from が to を使う | `Project:myapp` → `Tech:D1` |
+| `about` | from は to についての知識 | `Lesson:global/pwsh-native-args` → `Tech:PowerShell7` |
+| `responsible_for` | from が to を担当する | `Agent:codex-mypc` → `Component:myapp/auth` |
+| `contradicts` | from と to の内容が食い違う。どちらが正しいか確かめるまで両方残す | `Lesson:global/a` → `Lesson:global/b` |
+| `derived_from` | from は to から導いた知識 | `Convention:global/backup-first` → `Lesson:global/d1-export` |
+
+- 食い違う知識を見つけたら、古いほうを消さずに `contradicts` で結びます。確かめて置き換えると決めたら、新しい Decision から `supersedes` で結びます
+- 足さなかった種類: `supports`（`about` と `derived_from` で足ります）、`applied_to`（`applies_to` と紛らわしいため）、`validated_by`（知識を確かめる流れ（Issue #21）を作るときに考えます）
+- 打ち間違い（`applied_to`、`part-of` など）は、正しい種類の候補をエラーで返します。これまでに作った別の種類の関係は、そのまま残り、`delete_relations` で消せます
+
 ## スコープ
 
 記憶はスコープで分かれていて、URL で指定します。

@@ -930,4 +930,23 @@ await test('d. observation に得たタスクを記録できる（同じスコ�
   assert.ok(page.text.includes(`/dashboard/tasks/${task.id}?scope=p%3Akb`), '管理画面にタスクへのリンク');
 });
 
+await test('#19 関係の種類: 決まった種類だけ作れる。打ち間違いには候補を示す。古い種類も消せる', async () => {
+  const mk = (relationType) => tool(claudeTok, 'create_relations', { relations: [{ from: 'Lesson:kb/ps-heredoc', to: 'Lesson:kb/ps-encoding', relationType }] }, KB);
+  assert.equal((await mk('contradicts')).created, 1);
+  assert.equal((await mk('derived_from')).created, 1);
+  const typo = await mk('applied_to');
+  assert.ok(typo.error && typo.error.includes('applies_to のことですか'));
+  assert.ok((await mk('Part-Of')).error.includes('part_of のことですか'));
+  const unknown = await mk('supports');
+  assert.ok(unknown.error.includes('使える種類') && !unknown.error.includes('ですか'));
+  // 種類を絞る前に作られた関係（直接書き込む）も、delete_relations で消せる
+  env.DB.db.prepare(`INSERT INTO relations (from_id, to_id, relation_type)
+    SELECT f.id, t.id, 'old_kind' FROM entities f, entities t WHERE f.scope = 'p:kb' AND f.name = 'Tech:D1' AND t.scope = 'p:kb' AND t.name = 'Tech:PowerShell7'`).run();
+  assert.equal((await tool(claudeTok, 'delete_relations', { relations: [{ from: 'Tech:D1', to: 'Tech:PowerShell7', relationType: 'old_kind' }] }, KB)).deleted, 1);
+  const list = await post(KB, { jsonrpc: '2.0', id: nextId++, method: 'tools/list' }, claudeTok);
+  const schema = list.body.result.tools.find((t) => t.name === 'create_relations').inputSchema;
+  assert.deepEqual(schema.properties.relations.items.properties.relationType.enum,
+    ['part_of', 'applies_to', 'supersedes', 'uses', 'about', 'responsible_for', 'contradicts', 'derived_from']);
+});
+
 console.log(`\n${passed} 件のテストに成功しました`);
