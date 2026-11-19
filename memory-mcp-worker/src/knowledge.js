@@ -234,3 +234,124 @@ export function checkEntity(name, entityType, scope) {
   if (where === 'project' && scope === 'global') return { hint: `${name}: ${entityType} はプロジェクト（memory-project）に置くのが目安です` };
   return {};
 }
+
+// ---------------------------------------------------------------------------
+// 重複の候補（#28）。自動ではまとめず、管理画面で人が確かめてからまとめる・消す
+// ---------------------------------------------------------------------------
+
+const PAIRWISE_LIMIT = 500;    // 種類ごとに総当たりで比べるエンティティの上限（Worker の CPU 時間を守る）
+const OBSERVATION_SCAN = 5000; // 同じ内容の observation を探すときに読む上限
+const SIMILAR_JACCARD = 0.7;
+
+/** 名前の比べる部分。「種類:」とスコープの部分（最後の / より前）を除き、表記ゆれ（全角・半角、大文字・小文字、区切り記号）をそろえる */
+export function nameKey(name) {
+  const body = name.includes(':') ? name.slice(name.indexOf(':') + 1) : name;
+  const last = body.includes('/') ? body.slice(body.lastIndexOf('/') + 1) : body;
+  return last.normalize('NFKC').toLowerCase().replace(/[\s_\-.・/]+/g, '');
+}
+
+/** observation の比べる部分。先頭の [日付 書き手] と、空白・句読点を除く */
+export function contentKey(content) {
+  return content
+    .replace(/^\s*\[[^\]]*\]\s*/, '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\s。、，．,.!?！？「」『』（）()"'`:：;；]+/g, '');
+}
+
+function bigrams(s) {
+  const chars = [...s];
+  const set = new Set();
+  for (let i = 0; i < chars.length - 1; i++) set.add(chars[i] + chars[i + 1]);
+  return set;
+}
+
+function jaccard(a, b) {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
+/** 2 つの名前が似ているか。似ていれば理由（same / contains / similar）、似ていなければ null */
+function similarity(ka, kb, ga, gb) {
+  if (ka === kb) return 'same';
+  const [short, long] = ka.length <= kb.length ? [ka, kb] : [kb, ka];
+  if ([...short].length >= 4 && long.includes(short)) return 'contains';
+  if ([...short].length >= 4 && jaccard(ga, gb) >= SIMILAR_JACCARD) return 'similar';
+  return null;
+}
+
+export const SIMILAR_LABEL = { same: '表記ゆれ', contains: '片方がもう片方を含む', similar: 'よく似ている' };
+
+/** 同じ種類で、名前の似たエンティティの組（同じスコープの中）。[{ a, b, entityType, reason }] */
+function similarPairs(entities) {
+  const byType = new Map();
+  for (const e of entities) {
+    if (!byType.has(e.entity_type)) byType.set(e.entity_type, []);
+    byType.get(e.entity_type).push({ ...e, key: nameKey(e.name) });
+  }
+  const pairs = [];
+  for (const [type, list] of byType) {
+    const items = list.slice(0, PAIRWISE_LIMIT).map((e) => ({ ...e, grams: bigrams(e.key) }));
+    for (let i = 0; i < items.length; i++) {
+      for (let j = i + 1; j < items.length; j++) {
+        const reason = items[i].key && items[j].key ? similarity(items[i].key, items[j].key, items[i].grams, items[j].grams) : null;
+        if (reason) pairs.push({ a: items[i].name, b: items[j].name, entityType: type, reason });
+      }
+    }
+  }
+  const order = { same: 0, contains: 1, similar: 2 };
+  return pairs.sort((x, y) => order[x.reason] - order[y.reason] || x.a.localeCompare(y.a));
+}
+
+/**
+ * スコープの中の重複の候補。
+ * entities: 名前の似たエンティティの組、observations: 同じ内容（日付・書き手・句読点を除いて同じ）の observation のまとまり
+ */
+export async function duplicateCandidates(db, scope) {
+  const { results: entities } = await db
+    .prepare('SELECT id, name, entity_type FROM entities WHERE scope = ?1 ORDER BY id')
+    .bind(scope)
+    .all();
+  const { results: obs } = await db
+    .prepare(
+      `SELECT o.id, o.content, o.author, o.created_at, e.name FROM observations AS o JOIN entities AS e ON e.id = o.entity_id
+       WHERE e.scope = ?1 ORDER BY o.id LIMIT ${OBSERVATION_SCAN}`
+    )
+    .bind(scope)
+    .all();
+  const groups = new Map();
+  for (const o of obs) {
+    const key = contentKey(o.content);
+    if ([...key].length < 6) continue; // 短すぎるもの（「x」など）は偶然そろいやすいので見ない
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(o);
+  }
+  return {
+    entities: similarPairs(entities),
+    observations: [...groups.values()].filter((g) => g.length > 1),
+    scannedAll: obs.length < OBSERVATION_SCAN,
+  };
+}
+
+/** 作ったばかりのエンティティに似た、既存のエンティティ（create_entities の知らせ用）。[{ name, similarTo: [...] }] */
+export async function similarExisting(db, scope, created) {
+  if (!created.length) return [];
+  const { results } = await db
+    .prepare(
+      `SELECT name, entity_type FROM entities WHERE scope = ?1 AND entity_type IN (SELECT value FROM json_each(?2))
+         AND name NOT IN (SELECT value FROM json_each(?3)) ORDER BY id DESC LIMIT ${PAIRWISE_LIMIT}`
+    )
+    .bind(scope, JSON.stringify([...new Set(created.map((c) => c.entityType))]), JSON.stringify(created.map((c) => c.name)))
+    .all();
+  const existing = results.map((r) => ({ ...r, key: nameKey(r.name), grams: bigrams(nameKey(r.name)) }));
+  const out = [];
+  for (const c of created) {
+    const key = nameKey(c.name);
+    const grams = bigrams(key);
+    const hits = existing.filter((e) => e.entity_type === c.entityType && key && e.key && similarity(key, e.key, grams, e.grams)).map((e) => e.name);
+    if (hits.length) out.push({ name: c.name, similarTo: hits.slice(0, 3) });
+  }
+  return out;
+}

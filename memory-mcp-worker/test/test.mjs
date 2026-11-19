@@ -987,4 +987,57 @@ await test('#18 #22 エンティティの種類: 決まった種類だけ、名�
   assert.equal((await tool(claudeTok, 'delete_entities', { entityNames: ['Memo:old'] }, KB)).deleted, 1);
 });
 
+await test('#28 重複の候補: 似た名前・同じ内容を見つけ、管理画面でまとめられる。作ったときにも知らせる', async () => {
+  const { nameKey, contentKey } = await import('../src/knowledge.js');
+  assert.equal(nameKey('Lesson:global/PWSH_utf8'), nameKey('Lesson:global/pwsh-utf8'));
+  assert.equal(contentKey('[2026-11-01 a] D1 は export できない。'), contentKey('[2026-11-19 b]  d1 は export できない'));
+
+  const D = '/mcp/p/dup';
+  await tool(claudeTok, 'create_entities', { entities: [
+    { name: 'Lesson:dup/pwsh-utf8', entityType: 'Lesson', observations: ['[2026-11-01 claude-a] PowerShell の既定の文字コードに注意する', '元だけにある内容'] },
+    { name: 'Tech:Cloudflare', entityType: 'Tech', observations: ['x'] },
+    { name: 'Tech:CloudflareWorkers', entityType: 'Tech', observations: ['y'] },
+    { name: 'Lesson:dup/cloudflare', entityType: 'Lesson', observations: ['種類が違えば候補にしない'] },
+  ] }, D);
+  await tool(claudeTok, 'create_relations', { relations: [{ from: 'Lesson:dup/pwsh-utf8', to: 'Tech:Cloudflare', relationType: 'about' }] }, D);
+  // 書き込んだときに、似た名前を知らせる（作成は止めない）
+  const second = await tool(codexTok, 'create_entities', { entities: [
+    { name: 'Lesson:dup/PWSH_UTF8', entityType: 'Lesson', observations: ['[2026-11-19 codex-b] PowerShell の既定の文字コードに注意する。'] },
+  ] }, D);
+  assert.deepEqual(second.created, ['Lesson:dup/PWSH_UTF8']);
+  assert.deepEqual(second.similar, [{ name: 'Lesson:dup/PWSH_UTF8', similarTo: ['Lesson:dup/pwsh-utf8'] }]);
+  assert.ok(second.similarHint);
+  await tool(codexTok, 'create_relations', { relations: [
+    { from: 'Lesson:dup/PWSH_UTF8', to: 'Tech:Cloudflare', relationType: 'about' },
+    { from: 'Lesson:dup/PWSH_UTF8', to: 'Lesson:dup/pwsh-utf8', relationType: 'contradicts' },
+  ] }, D);
+  assert.equal((await tool(codexTok, 'create_entities', { entities: [{ name: 'Lesson:dup/totally-new', entityType: 'Lesson' }] }, D)).similar, undefined);
+
+  const page = await dash('GET', '/dashboard/duplicates?scope=p%3Adup', { cookie: dashCookie });
+  assert.equal(page.status, 200);
+  assert.ok(page.text.includes('表記ゆれ'), '表記ゆれの組');
+  assert.ok(page.text.includes('片方がもう片方を含む'), 'Cloudflare と CloudflareWorkers');
+  assert.ok(!page.text.includes('Lesson:dup/cloudflare</code></a><br>'), '種類が違うものは組にしない');
+  assert.ok(page.text.includes('既定の文字コード'), '同じ内容の observation');
+
+  // まとめる（確認を挟む）
+  const path = '/dashboard/duplicates?scope=p%3Adup';
+  const csrf = await dashCsrf(path);
+  const form = { op: 'entity_merge', csrf, scope: 'p:dup', from: 'Lesson:dup/PWSH_UTF8', into: 'Lesson:dup/pwsh-utf8', back: path };
+  const ask = await dashAct(form);
+  assert.equal(ask.status, 200);
+  assert.ok(ask.text.includes('まとめる元: Lesson:dup/PWSH_UTF8'));
+  assert.equal((await dashAct({ ...form, confirm: '1' })).status, 303);
+  const merged = await tool(claudeTok, 'open_nodes', { names: ['Lesson:dup/pwsh-utf8', 'Lesson:dup/PWSH_UTF8'] }, D);
+  assert.deepEqual(merged.not_found, ['Lesson:dup/PWSH_UTF8'], '元は消える');
+  const obs = merged.entities[0].observations;
+  assert.equal(obs.length, 3, '元の observation が移る');
+  assert.ok(obs.includes('元だけにある内容'));
+  assert.deepEqual(merged.relations.map((r) => `${r.from} ${r.relationType} ${r.to}`), ['Lesson:dup/pwsh-utf8 about Tech:Cloudflare'],
+    '同じ関係は 1 つに、まとめた 2 つを結んでいた関係は消える');
+  assert.equal(audits().at(-1).action, 'entity_merge');
+  assert.equal((await dashAct({ ...form, confirm: '1' })).status, 400, 'もう元がない');
+  assert.equal((await dashAct({ ...form, from: 'Lesson:dup/pwsh-utf8', confirm: '1' })).status, 400, '自分自身にはまとめられない');
+});
+
 console.log(`\n${passed} 件のテストに成功しました`);

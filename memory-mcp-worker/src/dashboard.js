@@ -13,6 +13,7 @@
  *   GET  /dashboard/entities?scope=  エンティティの一覧（q= で名前・種別を絞る）
  *   GET  /dashboard/entity?scope=&name= エンティティの詳細。observation の追加・修正・削除、関係・エンティティの削除
  *   GET  /dashboard/agents           エージェントと呼び名、書いた記憶の数。呼び名・自己紹介を直せる
+ *   GET  /dashboard/duplicates?scope= 重複の候補（似た名前のエンティティ、同じ内容の observation）。まとめる・消す
  *   GET  /dashboard/audit            この画面から行った変更の記録
  *
  * セキュリティ（タスク #4・#5 での Codex の意見を反映）
@@ -28,7 +29,7 @@
  */
 
 import { ToolInputError, nicknameKey, saveProfile } from './mcp.js';
-import { ENTITY_TYPES } from './knowledge.js';
+import { ENTITY_TYPES, SIMILAR_LABEL, duplicateCandidates } from './knowledge.js';
 
 const COOKIE = 'mc_dash';
 const SESSION_SECONDS = 8 * 60 * 60;
@@ -93,6 +94,7 @@ export async function handleDashboard(request, env) {
     if (path === '/dashboard/memory') return await memoryPage(ctx);
     if (path === '/dashboard/entities') return await entitiesPage(ctx);
     if (path === '/dashboard/entity') return await entityPage(ctx);
+    if (path === '/dashboard/duplicates') return await duplicatesPage(ctx);
   } catch (err) {
     console.error(err);
     return html(500, 'エラー', '<p>表示できませんでした。データベースの変更（npm run db:migrate）が済んでいるか確かめてください。</p>');
@@ -675,6 +677,46 @@ ${rest.length ? `<h2>呼び名のない書き手</h2>
   return html(200, 'エージェント', body);
 }
 
+/** 重複の候補。自動ではまとめず、人が見て「まとめる」か「消す」を選ぶ */
+async function duplicatesPage(ctx) {
+  const { db, scope, nick, tz } = ctx;
+  const { entities, observations, scannedAll } = await duplicateCandidates(db, scope);
+  const link = (name) => `<a href="${esc(entityHref(scope, name))}"><code>${esc(name)}</code></a>`;
+  const mergeForm = (from, into) =>
+    form(ctx, 'entity_merge', { from, into }, `<button type="submit" class="small">${esc(into)} にまとめる</button>`);
+  const pairRows = entities
+    .map(
+      (p) => `<tr>
+  <td>${link(p.a)}<br>${link(p.b)}</td>
+  <td>${esc(p.entityType)}</td>
+  <td>${esc(SIMILAR_LABEL[p.reason])}</td>
+  <td><div class="actions">${mergeForm(p.b, p.a)}${mergeForm(p.a, p.b)}</div></td>
+</tr>`
+    )
+    .join('');
+  const groupItems = observations
+    .map(
+      (g) => `<li><ul class="dup">${g
+        .map(
+          (o) => `<li>${link(o.name)} <span class="muted">· ${o.author ? who(o.author, nick) : '書き手不明'} · ${esc(time(o.created_at, tz))}</span>
+  <div class="text">${esc(o.content)}</div>
+  ${form(ctx, 'obs_delete', { id: o.id }, '<button type="submit" class="small danger">この observation を消す</button>')}</li>`
+        )
+        .join('')}</ul></li>`
+    )
+    .join('');
+  const body = `${scopeNav(scope, 'duplicates')}
+<p class="muted">名前や内容から、重複していそうなものを挙げています。同じものかどうかは中身を見て判断してください（自動ではまとめません）。</p>
+<h2>似た名前のエンティティ <span class="muted">${entities.length}</span></h2>
+${entities.length ? `<table><thead><tr><th>エンティティ</th><th>種類</th><th>理由</th><th>まとめる</th></tr></thead><tbody>${pairRows}</tbody></table>
+<p class="muted">「まとめる」と、もう片方の observation と関係を移してから、もう片方を消します（確認の画面を挟みます）。</p>` : '<p class="muted">ありません。</p>'}
+<h2>同じ内容の observation <span class="muted">${observations.length}</span></h2>
+<p class="muted">先頭の [日付 書き手] と句読点を除いて同じものです。</p>
+${observations.length ? `<ol class="observations">${groupItems}</ol>` : '<p class="muted">ありません。</p>'}
+${scannedAll ? '' : '<p class="warn">observation が多いため、古いものから一部だけを調べています。</p>'}`;
+  return html(200, `重複の候補 — ${scopeLabel(scope)}`, body);
+}
+
 /** この画面から行った変更の記録（新しい順、ページング） */
 async function auditPage({ db, tz, url }) {
   const before = pageCursor(url);
@@ -899,6 +941,55 @@ const ACTIONS = {
         target: `メッセージ ${m.id}`,
         detail: `${m.from_agent || '不明'} → ${m.to_agent}${m.task_id ? `（タスク #${m.task_id}）` : ''}\n${m.body}`,
         back: backPath(f.get('back')),
+      };
+    },
+  },
+  entity_merge: {
+    label: 'エンティティをまとめる',
+    confirm: 'まとめる元の observation と関係を、まとめる先に移してから、まとめる元を消します。',
+    async load(db, scope, f) {
+      const from = text(f, 'from', MAX_NAME);
+      const into = text(f, 'into', MAX_NAME);
+      if (from === into) throw new EditError('同じエンティティどうしはまとめられません');
+      const stats = (name) =>
+        db
+          .prepare(
+            `SELECT e.id, e.name, e.entity_type,
+               (SELECT COUNT(*) FROM observations WHERE entity_id = e.id) AS observations,
+               (SELECT COUNT(*) FROM relations WHERE from_id = e.id OR to_id = e.id) AS relations
+             FROM entities AS e WHERE e.scope = ?1 AND e.name = ?2`
+          )
+          .bind(scope, name)
+          .first();
+      const [a, b] = await Promise.all([stats(from), stats(into)]);
+      if (!a || !b) throw new EditError('エンティティが見つかりません');
+      return { a, b };
+    },
+    summary: ({ a, b }) =>
+      `まとめる元: ${a.name}（${a.entity_type}、observation ${a.observations} 件、関係 ${a.relations} 件）
+まとめる先: ${b.name}（${b.entity_type}、observation ${b.observations} 件、関係 ${b.relations} 件）`,
+    apply(db, scope, { a, b }) {
+      return {
+        stmts: [
+          // observation を移す（同じ内容がまとめる先にあれば移さずに消える）
+          db
+            .prepare(
+              `INSERT OR IGNORE INTO observations (entity_id, content, author, created_at, task_id)
+               SELECT ?2, content, author, created_at, task_id FROM observations WHERE entity_id = ?1 ORDER BY id`
+            )
+            .bind(a.id, b.id),
+          db.prepare('DELETE FROM observations WHERE entity_id = ?1').bind(a.id),
+          // 関係を付け替える（同じ関係がすでにあれば付け替えずに消える。a と b を結んでいた関係も消える）
+          db.prepare('DELETE FROM relations WHERE (from_id = ?1 AND to_id = ?2) OR (from_id = ?2 AND to_id = ?1)').bind(a.id, b.id),
+          db.prepare('UPDATE OR IGNORE relations SET from_id = ?2 WHERE from_id = ?1').bind(a.id, b.id),
+          db.prepare('UPDATE OR IGNORE relations SET to_id = ?2 WHERE to_id = ?1').bind(a.id, b.id),
+          db.prepare('DELETE FROM relations WHERE from_id = ?1 OR to_id = ?1').bind(a.id),
+          db.prepare('DELETE FROM entities WHERE id = ?1').bind(a.id),
+          db.prepare("UPDATE entities SET updated_at = datetime('now') WHERE id = ?1").bind(b.id),
+        ],
+        target: b.name,
+        detail: `${a.name} を ${b.name} にまとめた（元の observation ${a.observations} 件、関係 ${a.relations} 件）`,
+        back: entityHref(scope, b.name),
       };
     },
   },
@@ -1140,7 +1231,7 @@ function scopeNav(scope, current) {
   const q = `?scope=${encodeURIComponent(scope)}`;
   const tab = (key, label) =>
     `<a href="/dashboard/${key}${q}"${key === current ? ' aria-current="page"' : ''}>${label}</a>`;
-  return `<nav class="tabs"><span class="scope">${esc(scopeLabel(scope))}</span>${tab('tasks', 'タスク')}${tab('messages', 'メッセージ')}${tab('memory', '記憶の書き込み')}${tab('entities', 'エンティティ')}</nav>`;
+  return `<nav class="tabs"><span class="scope">${esc(scopeLabel(scope))}</span>${tab('tasks', 'タスク')}${tab('messages', 'メッセージ')}${tab('memory', '記憶の書き込み')}${tab('entities', 'エンティティ')}${tab('duplicates', '重複の候補')}</nav>`;
 }
 
 function nextLink(url, lastId) {
@@ -1289,5 +1380,6 @@ details.edit summary { cursor: pointer; color: var(--accent); font-size: .9rem; 
 .observations li, .relations li { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; overflow-wrap: anywhere; }
 .search, .confirm { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 0 0 16px; }
 .search input { flex: 1 1 240px; }
+.dup { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
 .chips { display: flex; gap: 12px; flex-wrap: wrap; margin: 0 0 12px; font-size: .9rem; }
 `;

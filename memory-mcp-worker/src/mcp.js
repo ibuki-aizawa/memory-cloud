@@ -18,10 +18,10 @@
  */
 import { adminIdentity, bearerToken, handleAdmin, resolveAgent } from './agents.js';
 import { handleDashboard, isDashboardPath } from './dashboard.js';
-import { ENTITY_TYPES, RELATION_TYPES, checkEntity, checkRelationType, knowledgeForTask, rankEntities, relatedEntities, searchTerms } from './knowledge.js';
+import { ENTITY_TYPES, RELATION_TYPES, checkEntity, checkRelationType, similarExisting, knowledgeForTask, rankEntities, relatedEntities, searchTerms } from './knowledge.js';
 import { GUIDE_PROMPT, GUIDE_PROMPT_NAME, GUIDE_RESOURCE, GUIDE_URI, GUIDE_VERSION, renderGuide, renderOnboardingPrompt } from './guide.js';
 
-const SERVER_INFO = { name: 'memory-mcp', version: '1.6.0' };
+const SERVER_INFO = { name: 'memory-mcp', version: '1.7.0' };
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 
 const MAX_ITEMS = 20;          // 1 回のツール呼び出しで扱う最大件数
@@ -890,6 +890,12 @@ const HANDLERS = {
       result.hint = '既存エンティティには add_observations を使ってください';
     }
     if (hints.length) result.placement = unique(hints); // 置き場所の目安と違うもの（作成はされている）
+    // 名前の似た既存のエンティティがあれば知らせる（重複なら既存に add_observations し、作ったものは delete_entities）
+    const similar = await similarExisting(db, scope, fresh);
+    if (similar.length) {
+      result.similar = similar;
+      result.similarHint = '似た名前のエンティティがあります。同じものなら既存のほうに add_observations で書き、作ったものは delete_entities で消してください';
+    }
     return result;
   },
 
