@@ -543,42 +543,7 @@ const HANDLERS = {
   },
 
   async set_profile(args, { db, identity }) {
-    const nickname = nicknameOf(args.nickname);
-    const key = nicknameKey(nickname);
-    const bio = optionalStr(args.bio, 'bio', MAX_BIO);
-
-    // 予約された名前・ほかのエージェントの本人確認の名前・ほかの人の呼び名とは重ねない（宛先が決まらなくなるため）
-    if (['owner', 'admin'].includes(key) || key.startsWith('github')) {
-      throw new ToolInputError(`${nickname} は予約されているので使えません`);
-    }
-    const clash = await db
-      .prepare(
-        `SELECT name AS identity FROM agents WHERE lower(name) = ?1 AND name <> ?2
-         UNION ALL
-         SELECT identity FROM profiles WHERE nickname_key = ?1 AND identity <> ?2
-         LIMIT 1`
-      )
-      .bind(key, identity.name)
-      .first();
-    if (clash) throw new ToolInputError(`呼び名 ${nickname} は ${clash.identity} が使っています。別の名前にしてください`);
-
-    try {
-      await db
-        .prepare(
-          `INSERT INTO profiles (identity, nickname, nickname_key, bio) VALUES (?1, ?2, ?3, ?4)
-           ON CONFLICT (identity) DO UPDATE SET nickname = excluded.nickname, nickname_key = excluded.nickname_key,
-             bio = excluded.bio, updated_at = datetime('now')`
-        )
-        .bind(identity.name, nickname, key, bio)
-        .run();
-    } catch (err) {
-      // 同時に同じ呼び名を登録しようとしたとき（UNIQUE 制約）
-      if (/UNIQUE/i.test(String(err && err.message))) throw new ToolInputError(`呼び名 ${nickname} はほかのエージェントが使っています`);
-      throw err;
-    }
-    const out = { name: identity.name, nickname };
-    if (bio) out.bio = bio;
-    return out;
+    return saveProfile(db, identity.name, args.nickname, args.bio);
   },
 
   // --- 協調 -----------------------------------------------------------------
@@ -1181,6 +1146,49 @@ async function agentName(db, value, field) {
   throw new ToolInputError(`${field}: エージェント ${name} は登録されていません。登録済み: ${known.join(', ')}`);
 }
 
+/**
+ * 呼び名と自己紹介を保存する（set_profile と確認画面で共用）。identity は本人確認の名前
+ */
+export async function saveProfile(db, identityName, nicknameValue, bioValue) {
+  const identity = { name: identityName };
+  const nickname = nicknameOf(nicknameValue);
+  const key = nicknameKey(nickname);
+  const bio = optionalStr(bioValue, 'bio', MAX_BIO);
+
+  // 予約された名前・ほかのエージェントの本人確認の名前・ほかの人の呼び名とは重ねない（宛先が決まらなくなるため）
+  if (['owner', 'admin'].includes(key) || key.startsWith('github')) {
+    throw new ToolInputError(`${nickname} は予約されているので使えません`);
+  }
+  const clash = await db
+    .prepare(
+      `SELECT name AS identity FROM agents WHERE lower(name) = ?1 AND name <> ?2
+       UNION ALL
+       SELECT identity FROM profiles WHERE nickname_key = ?1 AND identity <> ?2
+       LIMIT 1`
+    )
+    .bind(key, identity.name)
+    .first();
+  if (clash) throw new ToolInputError(`呼び名 ${nickname} は ${clash.identity} が使っています。別の名前にしてください`);
+
+  try {
+    await db
+      .prepare(
+        `INSERT INTO profiles (identity, nickname, nickname_key, bio) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (identity) DO UPDATE SET nickname = excluded.nickname, nickname_key = excluded.nickname_key,
+           bio = excluded.bio, updated_at = datetime('now')`
+      )
+      .bind(identity.name, nickname, key, bio)
+      .run();
+  } catch (err) {
+    // 同時に同じ呼び名を登録しようとしたとき（UNIQUE 制約）
+    if (/UNIQUE/i.test(String(err && err.message))) throw new ToolInputError(`呼び名 ${nickname} はほかのエージェントが使っています`);
+    throw err;
+  }
+  const out = { name: identity.name, nickname };
+  if (bio) out.bio = bio;
+  return out;
+}
+
 /** 本人確認の名前 → 呼び名 の Map */
 async function nicknames(db, names) {
   const list = unique(names.filter(Boolean));
@@ -1233,7 +1241,8 @@ function changes(res) {
 // 入力検証
 // ---------------------------------------------------------------------------
 
-class ToolInputError extends Error {}
+/** 入力の誤り。メッセージはそのまま利用者に見せてよい */
+export class ToolInputError extends Error {}
 
 function list(value, field) {
   if (!Array.isArray(value) || value.length === 0) throw new ToolInputError(`${field} は 1 件以上の配列で指定してください`);

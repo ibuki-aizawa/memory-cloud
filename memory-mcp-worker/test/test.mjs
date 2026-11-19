@@ -634,6 +634,142 @@ await test('確認画面: タスクは状態ごとにページングして見ら
   assert.equal((await dash('GET', '/dashboard/tasks?scope=global&status=wip', { cookie: dashCookie })).status, 400);
 });
 
+// 管理画面の変更。画面から CSRF トークンを読み取って送る
+async function dashCsrf(path) {
+  const page = await dash('GET', path, { cookie: dashCookie });
+  const m = page.text.match(/name="csrf" value="([0-9a-f]{64})"/);
+  assert.ok(m, `${path} に CSRF トークンがない`);
+  return m[1];
+}
+async function dashAct(form, opts = {}) {
+  return dash('POST', '/dashboard/action', { cookie: dashCookie, form, ...opts });
+}
+const audits = () => env.DB.db.prepare('SELECT action, target, detail FROM dashboard_audit ORDER BY id').all();
+
+await test('管理画面: エンティティを開いて observation を足す・直す・消す。変更は記録に残る', async () => {
+  await tool(claudeTok, 'create_entities', { entities: [
+    { name: 'Lesson:edit-me', entityType: 'Lesson', observations: ['[2026-11-19 claude-a] 最初の内容'] },
+    { name: 'Tech:Other', entityType: 'Tech', observations: ['x'] },
+  ] }, G);
+  await tool(claudeTok, 'create_relations', { relations: [{ from: 'Lesson:edit-me', to: 'Tech:Other', relationType: 'about' }] }, G);
+  const path = '/dashboard/entity?scope=global&name=Lesson%3Aedit-me';
+  const page = await dash('GET', path, { cookie: dashCookie });
+  assert.equal(page.status, 200);
+  assert.ok(page.text.includes('最初の内容') && page.text.includes('Tech:Other'));
+  const csrf = await dashCsrf(path);
+  const obsId = () => env.DB.db.prepare("SELECT o.id FROM observations o JOIN entities e ON e.id = o.entity_id WHERE e.name = 'Lesson:edit-me' ORDER BY o.id").all().map((r) => r.id);
+
+  const add = await dashAct({ op: 'obs_add', csrf, scope: 'global', entity: 'Lesson:edit-me', content: '[2026-11-19 owner] 足した内容', back: path });
+  assert.equal(add.status, 303);
+  assert.equal(add.headers.get('location'), path);
+  const added = env.DB.db.prepare("SELECT author FROM observations WHERE content = '[2026-11-19 owner] 足した内容'").get();
+  assert.equal(added.author, 'owner', '画面から足したものの書き手は owner');
+
+  const [first] = obsId();
+  assert.equal((await dashAct({ op: 'obs_edit', csrf, scope: 'global', id: String(first), content: '直した内容', back: path })).status, 303);
+  assert.equal(env.DB.db.prepare('SELECT content FROM observations WHERE id = ?').get(first).content, '直した内容');
+  const dup = await dashAct({ op: 'obs_edit', csrf, scope: 'global', id: String(first), content: '[2026-11-19 owner] 足した内容', back: path });
+  assert.equal(dup.status, 400, '同じエンティティに同じ内容は作れない');
+
+  // 削除は確認を挟む
+  const ask = await dashAct({ op: 'obs_delete', csrf, scope: 'global', id: String(first), back: path });
+  assert.equal(ask.status, 200);
+  assert.ok(ask.text.includes('name="confirm" value="1"') && ask.text.includes('直した内容'));
+  assert.equal(obsId().length, 2, '確認の前は消えない');
+  assert.equal((await dashAct({ op: 'obs_delete', csrf, scope: 'global', id: String(first), back: path, confirm: '1' })).status, 303);
+  assert.equal(obsId().length, 1);
+
+  // スコープが違えば触れない
+  const other = await dashAct({ op: 'obs_delete', csrf, scope: 'p:myapp', id: String(obsId()[0]), back: path, confirm: '1' });
+  assert.equal(other.status, 400);
+  assert.equal(obsId().length, 1);
+
+  const log = audits().filter((a) => a.target === 'Lesson:edit-me');
+  assert.deepEqual(log.map((a) => a.action), ['obs_add', 'obs_edit', 'obs_delete']);
+  assert.ok(log[1].detail.includes('前: [2026-11-19 claude-a] 最初の内容'), '書き換え前の値が残る');
+  assert.equal((await dash('GET', '/dashboard/audit', { cookie: dashCookie })).status, 200);
+
+  // 関係とエンティティの削除
+  const relId = env.DB.db.prepare("SELECT r.id FROM relations r JOIN entities f ON f.id = r.from_id WHERE f.name = 'Lesson:edit-me'").get().id;
+  assert.equal((await dashAct({ op: 'relation_delete', csrf, scope: 'global', id: String(relId), back: path, confirm: '1' })).status, 303);
+  assert.equal(env.DB.db.prepare('SELECT COUNT(*) AS n FROM relations WHERE id = ?').get(relId).n, 0);
+  const del = await dashAct({ op: 'entity_delete', csrf, scope: 'global', name: 'Lesson:edit-me', back: path, confirm: '1' });
+  assert.equal(del.status, 303);
+  assert.equal(del.headers.get('location'), '/dashboard/entities?scope=global');
+  assert.equal(env.DB.db.prepare("SELECT COUNT(*) AS n FROM entities WHERE name = 'Lesson:edit-me'").get().n, 0);
+  assert.ok(audits().at(-1).detail.includes('足した内容'), '消したエンティティの observation も記録に残る');
+  assert.equal((await dash('GET', path, { cookie: dashCookie })).status, 404);
+});
+
+await test('管理画面: CSRF トークン・同じオリジン・ログインがなければ変更できない', async () => {
+  const csrf = await dashCsrf('/dashboard/agents');
+  const before = audits().length;
+  const form = { op: 'profile_save', csrf, identity: 'claude-a', nickname: 'ハル', back: '/dashboard/agents' };
+  assert.equal((await dashAct({ ...form, csrf: '0'.repeat(64) })).status, 403, 'トークンが違う');
+  assert.equal((await dashAct({ ...form, csrf: undefined })).status, 403, 'トークンがない');
+  assert.equal((await dashAct(form, { origin: 'https://evil.example' })).status, 403, '別のオリジン');
+  assert.equal((await dash('POST', '/dashboard/action', { form })).status, 303, '未ログインはログインへ');
+  assert.equal((await dashAct({ ...form, op: 'constructor' })).status, 400, '知らない操作');
+  assert.equal(audits().length, before, 'どれも変更されない');
+  // 戻り先はこの画面の中だけ
+  const evil = await dashAct({ ...form, back: 'https://evil.example/' });
+  assert.equal(evil.headers.get('location'), '/dashboard/agents');
+  const evil2 = await dashAct({ ...form, nickname: 'ハル2', back: '//evil.example/dashboard' });
+  assert.equal(evil2.headers.get('location'), '/dashboard/agents');
+});
+
+await test('管理画面: 呼び名を直す・消す（set_profile と同じ検証）。書き手ごとの記憶へたどれる', async () => {
+  const csrf = await dashCsrf('/dashboard/agents');
+  assert.equal(env.DB.db.prepare("SELECT nickname FROM profiles WHERE identity = 'claude-a'").get().nickname, 'ハル2');
+  const clash = await dashAct({ op: 'profile_save', csrf, identity: 'claude-a', nickname: 'ミナト', back: '/dashboard/agents' });
+  assert.equal(clash.status, 400, 'ほかの人の呼び名は使えない');
+  assert.ok(clash.text.includes('codex-b'));
+  assert.equal((await dashAct({ op: 'profile_save', csrf, identity: 'claude-a', nickname: 'owner', back: '/' })).status, 400, '予約語');
+  assert.equal((await dashAct({ op: 'profile_save', csrf, identity: 'nobody', nickname: 'ナナ', back: '/' })).status, 400, '知らない相手');
+  assert.equal((await dashAct({ op: 'profile_delete', csrf, identity: 'claude-a', back: '/', confirm: '1' })).status, 303);
+  assert.equal(env.DB.db.prepare("SELECT COUNT(*) AS n FROM profiles WHERE identity = 'claude-a'").get().n, 0);
+
+  const agents = await dash('GET', '/dashboard/agents', { cookie: dashCookie });
+  assert.ok(agents.text.includes('/dashboard/memory?scope=global&#38;author=claude-a'), '書いた記憶へのリンク');
+  const mine = await dash('GET', '/dashboard/memory?scope=global&author=codex-b', { cookie: dashCookie });
+  assert.equal(mine.status, 200);
+  assert.ok(!mine.text.includes('Tech:Other'), 'ほかの書き手の記憶は出ない');
+  const list = await dash('GET', '/dashboard/entities?scope=global&q=Other', { cookie: dashCookie });
+  assert.ok(list.text.includes('Tech:Other'));
+  assert.ok(!list.text.includes('Project:'), '絞り込み');
+});
+
+await test('管理画面: タスクの状態・担当を変えると経過に残り、新しい担当に知らせる。メッセージは既読・削除できる', async () => {
+  const { task } = await tool(claudeTok, 'task_create', { title: '画面から割り当てる' }, G);
+  const path = `/dashboard/tasks/${task.id}?scope=global`;
+  const csrf = await dashCsrf(path);
+  const r = await dashAct({ op: 'task_edit', csrf, scope: 'global', id: String(task.id), status: 'in_progress', assignee: 'ミナト', note: 'お願いします', back: path });
+  assert.equal(r.status, 303);
+  const t = (await tool(codexTok, 'task_get', { id: task.id }, G)).task;
+  assert.equal(t.assignee, 'codex-b', '呼び名は本人確認の名前に読み替える');
+  assert.equal(t.status, 'in_progress');
+  assert.ok(t.leaseExpiresAt);
+  const notice = env.DB.db.prepare('SELECT * FROM messages WHERE task_id = ? AND to_agent = ?').get(task.id, 'codex-b');
+  assert.ok(notice && notice.from_agent === 'owner' && notice.kind === 'request' && notice.body.includes('お願いします'));
+  const events = (await tool(codexTok, 'task_get', { id: task.id }, G)).events;
+  assert.ok(events.some((e) => e.kind === 'handoff' && e.actor === 'owner'));
+
+  assert.equal((await dashAct({ op: 'task_edit', csrf, scope: 'global', id: String(task.id), status: 'done', assignee: 'だれか', back: path })).status, 400, '知らない担当');
+  assert.equal((await dashAct({ op: 'task_edit', csrf, scope: 'global', id: String(task.id), status: 'wip', assignee: '', back: path })).status, 400);
+  assert.equal((await dashAct({ op: 'task_edit', csrf, scope: 'global', id: String(task.id), status: 'cancelled', assignee: '', back: path })).status, 303);
+  const closed = (await tool(codexTok, 'task_get', { id: task.id }, G)).task;
+  assert.equal(closed.status, 'cancelled');
+  assert.equal(closed.assignee, null);
+
+  const msgId = env.DB.db.prepare('SELECT id FROM messages WHERE task_id = ? AND from_agent = ?').get(task.id, 'owner').id;
+  await dashAct({ op: 'msg_read', csrf, scope: 'global', id: String(msgId), read: '0', back: '/dashboard/messages?scope=global' });
+  assert.equal(env.DB.db.prepare('SELECT read_at FROM messages WHERE id = ?').get(msgId).read_at, null, '未読に戻る');
+  await dashAct({ op: 'msg_delete', csrf, scope: 'global', id: String(msgId), back: '/dashboard/messages?scope=global', confirm: '1' });
+  assert.equal(env.DB.db.prepare('SELECT COUNT(*) AS n FROM messages WHERE id = ?').get(msgId).n, 0);
+  const msgs = await dash('GET', '/dashboard/messages?scope=global', { cookie: dashCookie });
+  assert.ok(msgs.text.includes('既読にする') || msgs.text.includes('未読に戻す'));
+});
+
 await test('協調ツールの入力エラー', async () => {
   assert.ok((await tool(claudeTok, 'task_create', { title: ' ' })).error);
   assert.ok((await tool(claudeTok, 'task_claim', { id: 'abc' })).error);
