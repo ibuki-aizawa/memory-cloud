@@ -1,4 +1,4 @@
-export const GUIDE_VERSION = '1.2.0';
+export const GUIDE_VERSION = '1.3.0';
 export const GUIDE_URI = 'memory://guide';
 export const GUIDE_PROMPT_NAME = 'memory-onboarding';
 
@@ -9,7 +9,8 @@ const RULES = `## 記憶に書く内容
 
 ## 名前と observation
 - 名前は「種別:スコープ/名前」。例: \`Decision:myapp/use-sqlite\`。
-- 種別は Project, Component, Decision, Convention, Lesson, Agent, Tech, Person を使う。
+- 種別は Project, Component, Decision, Convention, Lesson, Agent, Tech, Person だけ（ほかは作れない）。名前は必ず「種別:」で始める。
+- 置き場所の目安: Project・Component・Decision はプロジェクト、Tech・Person は共通（global）、Convention・Lesson・Agent はどちらでも（複数のプロジェクトで通用するなら global）。
 - observation は \`[YYYY-MM-DD 書き手] 1文\`。書き手は \`whoami\` が返す本人確認の \`name\`（呼び名ではない）。
 - 保存前に \`search_nodes\` で重複を確認する。既存エンティティには \`add_observations\` を使う。
 - タスクの作業で得た知識には \`taskId\` を付ける（あとで経緯をたどれる）。

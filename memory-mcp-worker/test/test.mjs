@@ -949,4 +949,42 @@ await test('#19 関係の種類: 決まった種類だけ作れる。打ち間�
     ['part_of', 'applies_to', 'supersedes', 'uses', 'about', 'responsible_for', 'contradicts', 'derived_from']);
 });
 
+await test('#18 #22 エンティティの種類: 決まった種類だけ、名前は「種類:」で始める。置き場所の目安は placement で知らせる', async () => {
+  const mk = (entities, path = KB) => tool(claudeTok, 'create_entities', { entities }, path);
+  const typo = await mk([{ name: 'Lesson:kb/x', entityType: 'lesson' }]);
+  assert.ok(typo.error.includes('Lesson のことですか'));
+  assert.ok((await mk([{ name: 'Tech:Foo', entityType: 'Technology' }])).error.includes('Tech のことですか'));
+  const unknown = await mk([{ name: 'Note:kb/x', entityType: 'Note' }]);
+  assert.ok(unknown.error.includes('使える種類') && !unknown.error.includes('ですか'));
+  assert.ok((await mk([{ name: 'kb/no-prefix', entityType: 'Lesson' }])).error.includes('「Lesson:」で始めて'));
+  assert.ok((await mk([{ name: 'Tech:kb/x', entityType: 'Lesson' }])).error, '種類と名前の頭が食い違う');
+  assert.ok((await mk([{ name: 'Lesson:', entityType: 'Lesson' }])).error, '名前の本体が空');
+  // 1 件でも誤りがあれば、ほかも作らない
+  assert.ok((await mk([{ name: 'Lesson:kb/ok-1', entityType: 'Lesson' }, { name: 'Bad:x', entityType: 'Bad' }])).error);
+  assert.equal(env.DB.db.prepare("SELECT COUNT(*) AS n FROM entities WHERE name = 'Lesson:kb/ok-1'").get().n, 0);
+
+  const placed = await mk([{ name: 'Person:someone', entityType: 'Person' }, { name: 'Lesson:kb/fine', entityType: 'Lesson' }]);
+  assert.deepEqual(placed.created, ['Person:someone', 'Lesson:kb/fine'], '目安と違っても作成はされる');
+  assert.equal(placed.placement.length, 1);
+  assert.ok(placed.placement[0].includes('共通'));
+  const g = await mk([{ name: 'Decision:kb/in-global', entityType: 'Decision' }], G);
+  assert.ok(g.placement[0].includes('プロジェクト'));
+  assert.equal((await mk([{ name: 'Lesson:kb/no-hint', entityType: 'Lesson' }])).placement, undefined, '目安どおりなら出さない');
+
+  const list = await post(KB, { jsonrpc: '2.0', id: nextId++, method: 'tools/list' }, claudeTok);
+  const schema = list.body.result.tools.find((t) => t.name === 'create_entities').inputSchema;
+  assert.deepEqual(schema.properties.entities.items.properties.entityType.enum,
+    ['Project', 'Component', 'Decision', 'Convention', 'Lesson', 'Agent', 'Tech', 'Person']);
+
+  // 決まりより前に作られた種類は管理画面で印が付く。種類で絞れる
+  env.DB.db.prepare("INSERT INTO entities (scope, name, entity_type) VALUES ('p:kb', 'Memo:old', 'Memo')").run();
+  const page = await dash('GET', '/dashboard/entities?scope=p%3Akb', { cookie: dashCookie });
+  assert.ok(page.text.includes('決まった種類にない'));
+  const tech = await dash('GET', '/dashboard/entities?scope=p%3Akb&type=Tech', { cookie: dashCookie });
+  assert.ok(tech.text.includes('Tech:D1') && !tech.text.includes('Lesson:kb/fine'));
+  // 古い種類のエンティティにも observation は足せ、消せる
+  assert.equal((await tool(claudeTok, 'add_observations', { observations: [{ entityName: 'Memo:old', contents: ['x'] }] }, KB)).added, 1);
+  assert.equal((await tool(claudeTok, 'delete_entities', { entityNames: ['Memo:old'] }, KB)).deleted, 1);
+});
+
 console.log(`\n${passed} 件のテストに成功しました`);

@@ -28,6 +28,7 @@
  */
 
 import { ToolInputError, nicknameKey, saveProfile } from './mcp.js';
+import { ENTITY_TYPES } from './knowledge.js';
 
 const COOKIE = 'mc_dash';
 const SESSION_SECONDS = 8 * 60 * 60;
@@ -467,12 +468,17 @@ ${results.length > PAGE_SIZE ? nextLink(url, page.at(-1).id) : ''}`;
   return html(200, `記憶の書き込み — ${scopeLabel(scope)}`, body);
 }
 
-/** エンティティの一覧（新しく作った順）。q= で名前・種別を部分一致で絞る */
+/** エンティティの一覧（新しく作った順）。q= で名前・種別を部分一致で、type= で種類を絞る */
 async function entitiesPage({ db, scope, tz, url }) {
   const before = pageCursor(url);
   const q = (url.searchParams.get('q') || '').trim().slice(0, 100);
+  const type = (url.searchParams.get('type') || '').slice(0, 100);
   const where = ['e.scope = ?1'];
   const params = [scope];
+  if (type) {
+    params.push(type);
+    where.push(`e.entity_type = ?${params.length}`);
+  }
   if (q) {
     params.push(`%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
     where.push(`(e.name LIKE ?${params.length} ESCAPE '\\' OR e.entity_type LIKE ?${params.length} ESCAPE '\\')`);
@@ -501,9 +507,25 @@ async function entitiesPage({ db, scope, tz, url }) {
 </tr>`
     )
     .join('');
+  // 種類ごとの数（決まった種類にないものは印を付ける）
+  const { results: counts } = await db
+    .prepare('SELECT entity_type, COUNT(*) AS n FROM entities WHERE scope = ?1 GROUP BY entity_type ORDER BY n DESC, entity_type')
+    .bind(scope)
+    .all();
+  const all = `/dashboard/entities?scope=${encodeURIComponent(scope)}`;
+  const chips = counts
+    .map((c) => {
+      const label = `${esc(c.entity_type)} ${c.n}${Object.hasOwn(ENTITY_TYPES, c.entity_type) ? '' : ' <span class="badge warn">決まった種類にない</span>'}`;
+      return c.entity_type === type
+        ? `<strong>${label}</strong>`
+        : `<a href="${esc(`${all}&type=${encodeURIComponent(c.entity_type)}`)}">${label}</a>`;
+    })
+    .join('');
   const body = `${scopeNav(scope, 'entities')}
+${counts.length ? `<nav class="chips">${type ? `<a href="${esc(all)}">すべて</a>` : '<strong>すべて</strong>'}${chips}</nav>` : ''}
 <form method="get" action="/dashboard/entities" class="search">
   <input type="hidden" name="scope" value="${esc(scope)}">
+  ${type ? `<input type="hidden" name="type" value="${esc(type)}">` : ''}
   <input type="search" name="q" value="${esc(q)}" placeholder="名前・種別で絞る" aria-label="名前・種別で絞る" maxlength="100">
   <button type="submit">絞る</button>
 </form>
@@ -1267,4 +1289,5 @@ details.edit summary { cursor: pointer; color: var(--accent); font-size: .9rem; 
 .observations li, .relations li { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; overflow-wrap: anywhere; }
 .search, .confirm { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 0 0 16px; }
 .search input { flex: 1 1 240px; }
+.chips { display: flex; gap: 12px; flex-wrap: wrap; margin: 0 0 12px; font-size: .9rem; }
 `;

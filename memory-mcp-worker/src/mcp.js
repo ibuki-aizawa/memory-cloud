@@ -18,10 +18,10 @@
  */
 import { adminIdentity, bearerToken, handleAdmin, resolveAgent } from './agents.js';
 import { handleDashboard, isDashboardPath } from './dashboard.js';
-import { RELATION_TYPES, checkRelationType, knowledgeForTask, rankEntities, relatedEntities, searchTerms } from './knowledge.js';
+import { ENTITY_TYPES, RELATION_TYPES, checkEntity, checkRelationType, knowledgeForTask, rankEntities, relatedEntities, searchTerms } from './knowledge.js';
 import { GUIDE_PROMPT, GUIDE_PROMPT_NAME, GUIDE_RESOURCE, GUIDE_URI, GUIDE_VERSION, renderGuide, renderOnboardingPrompt } from './guide.js';
 
-const SERVER_INFO = { name: 'memory-mcp', version: '1.5.0' };
+const SERVER_INFO = { name: 'memory-mcp', version: '1.6.0' };
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 
 const MAX_ITEMS = 20;          // 1 回のツール呼び出しで扱う最大件数
@@ -50,7 +50,11 @@ const entitySchema = {
   type: 'object',
   properties: {
     name: { type: 'string', description: 'エンティティ名（例: Decision:myapp/use-sqlite）' },
-    entityType: { type: 'string', description: 'エンティティの種別（例: Decision）' },
+    entityType: {
+      type: 'string',
+      enum: Object.keys(ENTITY_TYPES),
+      description: `エンティティの種類。名前は「種類:」で始める。${Object.entries(ENTITY_TYPES).map(([k, v]) => `${k}: ${v.meaning}`).join(' / ')}`,
+    },
     observations: { type: 'array', items: { type: 'string' }, description: '事実（1 件 1 文）' },
   },
   required: ['name', 'entityType'],
@@ -846,6 +850,12 @@ const HANDLERS = {
       observations: optionalStrings(e && e.observations, `entities[${i}].observations`),
     }));
 
+    const hints = [];
+    entities.forEach((e, i) => {
+      const { error, hint } = checkEntity(e.name, e.entityType, scope);
+      if (error) throw new ToolInputError(`entities[${i}]: ${error}`);
+      if (hint) hints.push(hint);
+    });
     const names = unique(entities.map((e) => e.name));
     const existing = await existingNames(db, scope, names);
     const seen = new Set(existing);
@@ -879,6 +889,7 @@ const HANDLERS = {
       result.skipped_existing = existing;
       result.hint = '既存エンティティには add_observations を使ってください';
     }
+    if (hints.length) result.placement = unique(hints); // 置き場所の目安と違うもの（作成はされている）
     return result;
   },
 

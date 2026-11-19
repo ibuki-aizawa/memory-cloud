@@ -198,3 +198,39 @@ export function checkRelationType(value) {
   if (Object.hasOwn(RELATION_TYPES, key)) return { ok: null, suggestion: key };
   return { ok: null, suggestion: Object.hasOwn(RELATION_ALIASES, key) ? RELATION_ALIASES[key] : null };
 }
+
+/**
+ * エンティティの種類（#18）。where は置き場所の目安: global（共通）、project（プロジェクト）、any（どちらでも）。
+ * 名前は「種類:スコープ/名前」（Tech と Person はスコープを付けない「種類:名前」）
+ */
+export const ENTITY_TYPES = {
+  Project: { where: 'project', meaning: 'プロジェクトの入り口（目的・構成・主要Component の一覧）。1 プロジェクトに 1 つ', example: 'Project:myapp' },
+  Component: { where: 'project', meaning: 'プロジェクトの部品（画面・API・スクリプトなど）', example: 'Component:myapp/auth' },
+  Decision: { where: 'project', meaning: '決めたことと理由。変えるときは新しい Decision から supersedes', example: 'Decision:myapp/use-sqlite' },
+  Convention: { where: 'any', meaning: '守る決まり・書き方', example: 'Convention:global/commit-message-ja' },
+  Lesson: { where: 'any', meaning: 'やってみてわかった教訓（失敗とその回避策など）', example: 'Lesson:global/pwsh-native-args' },
+  Agent: { where: 'any', meaning: 'AI（エージェント）の役割や得意なこと', example: 'Agent:codex-mypc' },
+  Tech: { where: 'global', meaning: '使っている技術・道具とその使い方のこつ', example: 'Tech:PowerShell7' },
+  Person: { where: 'global', meaning: '人の好みや前提（秘密・個人情報は書かない）', example: 'Person:owner' },
+};
+
+const ENTITY_ALIASES = { technology: 'Tech', tool: 'Tech', library: 'Tech', rule: 'Convention', guideline: 'Convention', learning: 'Lesson', insight: 'Lesson', user: 'Person', owner: 'Person', module: 'Component', feature: 'Component', decisionrecord: 'Decision', adr: 'Decision' };
+
+/**
+ * エンティティの種類と名前を確かめる。
+ * 返り値: { error } 使えないとき / { hint } 使えるが置き場所が目安と違うとき / {} 問題なし
+ */
+export function checkEntity(name, entityType, scope) {
+  if (!Object.hasOwn(ENTITY_TYPES, entityType)) {
+    const key = entityType.toLowerCase().replace(/[\s_-]+/g, '');
+    const fixed = Object.keys(ENTITY_TYPES).find((t) => t.toLowerCase() === key) || (Object.hasOwn(ENTITY_ALIASES, key) ? ENTITY_ALIASES[key] : null);
+    return { error: `種類 ${entityType} は使えません。${fixed ? `${fixed} のことですか？ ` : ''}使える種類: ${Object.keys(ENTITY_TYPES).join(', ')}` };
+  }
+  if (!name.startsWith(`${entityType}:`) || name.length === entityType.length + 1) {
+    return { error: `${name}: 名前は「${entityType}:」で始めてください（例: ${ENTITY_TYPES[entityType].example}）` };
+  }
+  const where = ENTITY_TYPES[entityType].where;
+  if (where === 'global' && scope !== 'global') return { hint: `${name}: ${entityType} は共通（memory-global）に置くのが目安です` };
+  if (where === 'project' && scope === 'global') return { hint: `${name}: ${entityType} はプロジェクト（memory-project）に置くのが目安です` };
+  return {};
+}

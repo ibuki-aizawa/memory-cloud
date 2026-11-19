@@ -13,6 +13,27 @@ memory-cloud の記憶が、どんな形で保存され、AI がどう使うか�
 | observation | エンティティに付けるメモ。1 件 1 文 | `[2026-11-15 owner] 手軽さを優先して SQLite を採用` |
 | リレーション | エンティティどうしのつながり | `Component:myapp/auth` → `part_of` → `Project:myapp` |
 
+## エンティティの種類
+
+エンティティは、次の 8 種類だけを作れます（`create_entities` はほかの種類を受け付けません）。
+名前は `種類:スコープ/名前` で、必ず `種類:` で始めます。Tech と Person はスコープを付けず `種類:名前` にします。
+
+| 種類 | 入れるもの | 置き場所の目安 | 例 |
+|---|---|---|---|
+| `Project` | プロジェクトの入り口（目的・構成・主要Component の一覧）。1 プロジェクトに 1 つ | プロジェクト | `Project:myapp` |
+| `Component` | プロジェクトの部品（画面・API・スクリプトなど） | プロジェクト | `Component:myapp/auth` |
+| `Decision` | 決めたことと理由。変えるときは新しい Decision から `supersedes` | プロジェクト | `Decision:myapp/use-sqlite` |
+| `Convention` | 守る決まり・書き方 | どちらでも | `Convention:global/commit-message-ja` |
+| `Lesson` | やってみてわかった教訓（失敗とその回避策など） | どちらでも | `Lesson:global/pwsh-native-args` |
+| `Agent` | AI（エージェント）の役割や得意なこと | どちらでも | `Agent:codex-mypc` |
+| `Tech` | 使っている技術・道具とその使い方のこつ | 共通 | `Tech:PowerShell7` |
+| `Person` | 人の好みや前提（秘密・個人情報は書かない） | 共通 | `Person:owner` |
+
+- Convention・Lesson・Agent は、複数のプロジェクトで通用するなら共通（global）、そのプロジェクトだけのことならプロジェクトに置きます
+- 置き場所が目安と違っても作成はされます。結果の `placement` に、目安と違うことが書かれます
+- 打ち間違い（`lesson`、`Technology` など）は、正しい種類の候補をエラーで返します
+- 管理画面のエンティティ一覧で、種類ごとの数と、決まった種類にないもの（この決まりより前に作られたもの）がわかります
+
 ## リレーションの種類
 
 リレーションは、次の 8 種類だけを作れます（`create_relations` はほかの種類を受け付けません）。向きは「from が to に対して〜」と読みます。
@@ -57,7 +78,7 @@ AI には「いつ・何を・どう書くか」のルールを渡します。�
 
 主な決まりごと:
 - 名前は `種別:スコープ/名前`（例: `Decision:myapp/use-sqlite`）
-- 種別は Project, Component, Decision, Convention, Lesson, Agent, Tech, Person のどれか
+- 種別は下の「エンティティの種類」の 8 種類のどれか
 - observation は `[YYYY-MM-DD 書き手] 1文`。書き手は `whoami` で確認した名前（サーバーも書き手を自動で記録する）
 - 保存前に検索して重複を避け、既存のエンティティへの追記を優先する
 - 作業ログは保存しない。今後も使う事実・決定・教訓だけを保存する
@@ -107,3 +128,14 @@ pwsh ./client/import-jsonl.ps1 -Path <jsonl ファイル> -Scope myapp       # �
 ```
 
 何度実行しても重複しません。取り込んだあと、ローカルの server-memory の登録は削除して構いません。
+
+server-memory では種類や名前を自由に付けられるので、取り込むときに memory-cloud の決まり（上の「エンティティの種類」「リレーションの種類」）に合わせて変換します。
+
+- 大文字・小文字や、よくある言い換え（`person` → `Person`、`technology` → `Tech`、`Uses` → `uses` など）はそろえます
+- 名前が `種類:` で始まっていなければ付けます（例: `John_Smith` → `Person:John_Smith`）。リレーションの両端も付け替えます
+- 対応先がわからない種類があると、何も書き込まずに止まり、その種類を表示します。対応を指定してやり直してください
+
+```sh
+pwsh ./client/import-jsonl.ps1 -Path <jsonl ファイル> -Scope global -DryRun \
+  -TypeMap @{ note = 'Lesson' } -RelationMap @{ related_to = 'about' }   # -DryRun で変換の結果だけ確かめる
+```
